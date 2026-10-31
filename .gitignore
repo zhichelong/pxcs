@@ -27,6 +27,7 @@ Log/
 
 # --- packaging artifacts ------------------------------------------------
 *.spec
+!packaging/*.spec
 exe/
 *.exe
 
