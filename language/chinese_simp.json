@@ -358,5 +358,8 @@
     "conflict": "归档内路径冲突: {path} 来自 {first} 和 {second}",
     "not_file_or_dir": "既不是文件也不是目录: {path}",
     "no_files": "输入中没有可打包的文件"
+  },
+  "settings": {
+    "bad_config": "[WARN] 配置文件读取失败，已忽略：{path}（{error}）"
   }
 }

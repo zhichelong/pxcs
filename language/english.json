@@ -358,5 +358,8 @@
     "conflict": "Path conflict in archive: {path} from {first} and {second}",
     "not_file_or_dir": "Not a file or directory: {path}",
     "no_files": "No files to pack in the input"
+  },
+  "settings": {
+    "bad_config": "[WARN] Could not read config file, ignored: {path} ({error})"
   }
 }

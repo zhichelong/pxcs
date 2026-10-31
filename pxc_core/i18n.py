@@ -90,7 +90,7 @@ class Translator:
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError) as exc:
             raise LanguageError(f"{path}: {exc}") from exc
         try:

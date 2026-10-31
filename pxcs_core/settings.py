@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pxc_core.i18n import t
+
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     # 界面语言：language/<code>.json；默认简体中文。
@@ -86,8 +88,11 @@ def load_settings() -> dict[str, Any]:
     # 候选顺序 = 优先级从高到低；从低往高合并，保证前面的配置覆盖后面的。
     for path in reversed(found):
         try:
-            incoming = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            # utf-8-sig：Windows 记事本/PowerShell 很容易写出带 BOM 的文件，
+            # 按 utf-8 读会让 json 解析直接失败，配置被静默忽略。
+            incoming = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(t("settings.bad_config", path=path, error=exc), file=sys.stderr)
             continue
         if isinstance(incoming, dict):
             data = _merge(data, incoming)
