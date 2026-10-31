@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pxcs"
+version = "1.4.0"
+description = "Picture eXtreme Compression Set: an archive format for image collections"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "PXCS contributors" }]
+keywords = ["archive", "image", "compression", "delta", "png", "jpeg-xl"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: System :: Archiving",
+]
+dependencies = ["Pillow>=10.0", "numpy>=1.24"]
+
+[project.optional-dependencies]
+jxl = ["imagecodecs>=2024.1"]
+crypto = ["cryptography>=44.0"]
+all = ["imagecodecs>=2024.1", "cryptography>=44.0"]
+dev = ["coverage>=7.0"]
+
+[project.scripts]
+pxcs = "pxcs:main"
+
+[tool.setuptools]
+py-modules = ["pxc", "pxcs"]
+packages = ["pxc_core", "pxcs_core"]

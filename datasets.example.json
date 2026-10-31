@@ -1,0 +1,10 @@
+{
+  "example-small": {
+    "path": "D:\\pictures\\collection-a",
+    "note": "JPEG, ~500 files"
+  },
+  "example-big": {
+    "path": "D:\\pictures\\collection-b",
+    "note": "PNG, same-size variants"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "language": "chinese_simp",
+  "progress": {
+    "enabled": true,
+    "details": false,
+    "detail_lines": 3,
+    "refresh_seconds": 0.2
+  },
+  "normal_mode": {
+    "name_parts": 3,
+    "pause_on_finish": true,
+    "show_groups": true
+  },
+  "create": {
+    "group_mode": "resolution",
+    "group_regex": "\\d+_p",
+    "delta_quant": 12,
+    "delta_quant_max": 16,
+    "threads": 0,
+    "parallel_groups": 0,
+    "residual_codec": "auto",
+    "group_regex_fallback": "resolution",
+    "show_groups": false,
+    "residual_min_zero_fraction": 0.4,
+    "volumes": false,
+    "volume_size": 4294967296,
+    "decode_raw": false,
+    "memory_limit_mb": 0
+  },
+  "crypto": {
+    "kdf": "auto",
+    "encrypt_filenames": true,
+    "kdf_memory_kib": 262144,
+    "kdf_iterations": 3,
+    "kdf_lanes": 4
+  }
+}

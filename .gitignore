@@ -1,0 +1,34 @@
+# --- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# --- test / coverage ----------------------------------------------------
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+tests/_tmp/
+tests/_samples/
+
+# --- local data: never commit real datasets or archives -----------------
+datasets.json
+*.pxcs
+*.pxcs.[0-9][0-9][0-9]
+bench/
+reports/
+Log/
+
+# --- packaging artifacts ------------------------------------------------
+*.spec
+exe/
+*.exe
+
+# --- OS -----------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store

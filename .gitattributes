@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+# binary fixtures and archives
+*.pxc   binary
+*.pxcs  binary
+*.bin   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary

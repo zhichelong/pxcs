@@ -1,0 +1,8 @@
+# Runtime dependencies.
+Pillow>=10.0
+numpy>=1.24
+
+# Optional, but on by default where available:
+#   imagecodecs  - JPEG XL lossless JPEG repacking (codec `jpegxl`)
+#   cryptography - AES-256-GCM + Argon2id encrypted archives
+# Install them with:  pip install -e ".[jxl,crypto]"
