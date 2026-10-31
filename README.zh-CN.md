@@ -60,7 +60,10 @@ PXCS 先解码成像素，找到参考图，只存变化的部分。
 
 ## 快速开始
 
-需要 Windows + Python 3.10 以上（其它平台未测试，见下文）。
+**只想用工具？** [Releases](https://github.com/zhichelong/pxcs/releases) 页有预编译的
+Windows 单文件版，不需要装 Python。
+
+从源码运行需要 Windows + Python 3.10 以上（其它平台未测试，见下文）。
 
 ```powershell
 git clone <本仓库> pxcs

@@ -65,7 +65,11 @@ JPEG repacking via JPEG XL for images that have no neighbour to delta against.
 
 ## Quick start
 
-Requires Python 3.10+ on Windows (other platforms are untested, see below).
+**Just want the tool?** Grab the prebuilt Windows executable from
+[Releases](https://github.com/zhichelong/pxcs/releases) — no Python required.
+
+To run from source you need Python 3.10+ on Windows (other platforms are untested,
+see below).
 
 ```powershell
 git clone <this repo> pxcs
