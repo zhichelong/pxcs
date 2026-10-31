@@ -224,3 +224,20 @@ def reset_for_tests() -> None:
     global _TRANSLATOR
     with _LOCK:
         _TRANSLATOR = None
+
+
+def ensure_stdio_utf8() -> None:
+    """把 stdout/stderr 统一为 UTF-8（errors=replace）。
+
+    Windows 控制台与 CI 的默认编码可能是 cp1252 / cp936，直接 print 中文文案会抛
+    ``UnicodeEncodeError``。CLI 入口早就修过这一点，但库被直接调用（测试、脚本）
+    时没人负责，于是在非中文的 Windows 上会崩。这里做成幂等的，可以随便调。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass

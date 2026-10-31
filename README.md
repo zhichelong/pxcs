@@ -145,7 +145,8 @@ The project's priorities, in order: **correctness > compression ratio > speed**.
 
 - Payloads are deterministic: the same input and options produce byte-identical payloads.
   Whole archives are not (they carry a random `archive_id`), so compare payload-level with
-  `tools/pxcs_compare.py`.
+  `tools/pxcs_compare.py`. Entry *order* follows completion order under parallel encoding and
+  is not part of the contract.
 - A failed delta falls back to `raw` and records the reason; nothing is silently dropped.
   A group that cannot be committed aborts the whole archive instead of writing a short one.
 - `verify` decodes, not just hashes: tampered payloads are detected (see

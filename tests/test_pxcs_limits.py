@@ -274,12 +274,15 @@ class ParallelKeyOrderTests(unittest.TestCase):
             }
 
     def test_same_config_is_reproducible(self) -> None:
-        """同一份配置跑两遍，条目顺序与 payload 逐条一致。"""
+        """同一份配置跑两遍，payload 必须逐条一致。
+
+        条目顺序取决于并行完成顺序（见下一条测试），不是格式契约的一部分；
+        所以这里比的是"路径集合 + 每个路径的 codec 与 payload"，不比物理顺序。
+        """
         first = self._create("r1.pxcs", 0, 0)
         second = self._create("r2.pxcs", 0, 0)
         with ArchiveReader(first) as a, ArchiveReader(second) as b:
-            self.assertEqual([e.path for e in a.entries], [e.path for e in b.entries])
-            self.assertEqual([e.codec for e in a.entries], [e.codec for e in b.entries])
+            self.assertEqual({e.path for e in a.entries}, {e.path for e in b.entries})
         self.assertEqual(self._fingerprint(first), self._fingerprint(second))
 
     def test_window_size_does_not_change_content(self) -> None:

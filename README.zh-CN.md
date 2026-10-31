@@ -136,6 +136,7 @@ python pxcs.py extract C:\pxcs-demo\demo.pxcs -o C:\pxcs-restored
 
 - payload 是确定性的：同样输入和参数产出逐字节相同的 payload。整个归档不是确定的
   （带随机 `archive_id`），所以对比要用 `tools/pxcs_compare.py` 比 payload。
+  条目的**物理顺序**取决于并行完成顺序，不属于格式契约。
 - 差分失败会回退 `raw` 并记录 `reason`，不会静默丢弃；组提交失败会中止整个归档，
   绝不写出一份少条目的归档。
 - `verify` 会解码而不只是算哈希，篡改的 payload 能被发现（`tests/test_pxcs_resilience.py`）。
