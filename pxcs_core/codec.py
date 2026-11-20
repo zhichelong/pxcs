@@ -236,12 +236,13 @@ def encode_residual_with_preview(
     *,
     quant: int = 0,
     centered: bool = True,
-) -> tuple[bytes, bytes]:
-    """编码残差，并返回重建近似图的 pixel_sha256。
+) -> tuple[bytes, ImageData]:
+    """编码残差，并返回重建出的近似图。
 
-    有损量化时，归档能重建的是 quantize 后的近似像素；把该近似图的
-    哈希写进 index，verify 才能校验“归档内部自洽”。原始像素哈希不再
-    可用（这是 JPEG 差分压缩换取体积的代价）。
+    有损量化时，归档能重建的是 quantize 后的近似像素；把该近似图写进
+    index 的哈希，verify 才能校验“归档内部自洽”。参考树里子节点必须拿
+    这张近似图当参考——拿原始像素会让每一层的量化误差各自独立累加，
+    解码结果与记录的哈希对不上。
     """
     residual = make_residual(ref, current)
     if quant > 0:
@@ -258,7 +259,7 @@ def encode_residual_with_preview(
             current.mode, current.width, current.height, approx_data
         ),
     )
-    return payload, approx.pixel_hash
+    return payload, approx
 
 
 def encode_zlib_residual(
@@ -269,7 +270,7 @@ def encode_zlib_residual(
     level: int = 6,
     centered: bool = True,
     min_zero_fraction: float = 0.0,
-) -> tuple[bytes, bytes]:
+) -> tuple[bytes, ImageData]:
     """快速残差路径：居中/量化后直接 zlib 压缩整张残差数组。
 
     q=16 的残差大部分是 128，zlib 通常比 PXC tile 快 10 倍以上，
@@ -302,7 +303,7 @@ def encode_zlib_residual(
             current.mode, current.width, current.height, approx_data
         ),
     )
-    return payload, approx.pixel_hash
+    return payload, approx
 
 
 def decode_zlib_residual(

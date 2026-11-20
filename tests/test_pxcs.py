@@ -446,9 +446,16 @@ class PxcsTests(unittest.TestCase):
             for members in groups.values():
                 key = members[0]
                 self.assertIsNone(key.ref)
+                member_ids = {e.id for e in members}
                 for member in members[1:]:
-                    self.assertEqual(member.ref, key.id)
-                    self.assertEqual(member.depth, 1)
+                    # 组内差分：ref 必须指向更早的组内条目（参考树保证 ref < id），
+                    # 深度受 TREE_MAX_DEPTH 约束。不再假设所有成员都直接指向 key。
+                    self.assertIsNotNone(member.ref)
+                    self.assertLess(member.ref, member.id)
+                    self.assertIn(member.ref, member_ids)
+                    self.assertGreaterEqual(member.depth, 1)
+                    # 无损组允许延伸到 TREE_MAX_DEPTH_LOSSLESS(8)，这里只卡格式上限。
+                    self.assertLessEqual(member.depth, 8)
         self.assertEqual(verify_archive(archive).failed, 0)
 
     def test_regex_mode_and_fallback(self) -> None:

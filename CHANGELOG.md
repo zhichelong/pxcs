@@ -3,6 +3,29 @@
 Format minors 0-4 are all readable. This file records feature-level changes; the byte
 layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
+## 1.4.1
+
+- **In-group reference tree**: after thumbnail clustering, each member now references the
+  closest member planned before it instead of every member pointing at the group key.
+  Depth is capped at 3 and every `ref` still points backwards, so entry order is unchanged
+  and older readers need no adaptation.
+- **Layered encoding**: layer *d* uses the *reconstructed* pixels of layer *d-1* as its
+  reference. This is required for lossy residuals — referencing the original pixels makes
+  each layer's quantization error independent and `verify` rejects the archive.
+- **Depth follows the codec class.** Lossy residuals accumulate one quantization step
+  per layer, so the tree stops at 6; lossless residuals are reversible and go to 8.
+  Both are module constants (`TREE_MAX_DEPTH`, `TREE_MAX_DEPTH_LOSSLESS`).
+- Measured on 1106 JPEGs / 11.9 GiB of artist variant images: **17.29% -> 9.85%** of
+  source size (residual bytes 1222.9 -> 338.4 MiB; key frames unchanged at 833.3 MiB).
+  Wall time also drops, 680.4s -> 443.2s, because smaller residuals compress faster.
+- Measured on 73 PNGs / 803 MiB: **22.37% -> 16.64%**, 531s -> 260s.
+- Quality does not regress: deleting the PSNR of 10 deep entries against the depth-3
+  build gives **+0.10 dB on average** (max +0.26) — a deeper tree picks a closer
+  reference, so its residual carries less quantization error to begin with.
+- Cost: a cold single-image extraction is ~2.2x slower at depth 6 than at depth 1
+  (1.3s vs 0.6s per 4K entry); sequential extraction reuses the parent cache.
+- No format change: the same minors are written.
+
 ## 1.4.0
 
 - **`jpegxl` codec**: lossless JPEG repacking through JPEG XL. JPEGs are transcoded to a

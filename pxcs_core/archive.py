@@ -1247,7 +1247,7 @@ def create_archive(
                     chosen_quant = 0
                     for quant in quant_values:
                         if strict_group:
-                            payload, approx_hash = encode_residual_with_preview(
+                            payload, approx = encode_residual_with_preview(
                                 ref_image,
                                 image,
                                 opts.tile_size,
@@ -1255,7 +1255,7 @@ def create_archive(
                                 quant=quant,
                                 centered=True,
                             )
-                            approx_hex = approx_hash.hex()
+                            approx_hex = approx.pixel_hash.hex()
                         else:
                             payload = encode_residual(
                                 ref_image, image, opts.tile_size, threads=threads
