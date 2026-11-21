@@ -30,28 +30,38 @@ collection/                     PXCS archive
 
 ## Results
 
-15 real collections, 84.2 GiB, 14 590 images, all archives verified (0 failures).
-Ratio = archive size / source size; lower is better.
+Ratio = archive size / source size; lower is better. Nine collections, 2026-11-20,
+comparing the released 1.4.0 with the 1.4.1 reference tree:
 
-| Collection | Source | Before | After |
+| Collection | Source | 1.4.0 | 1.4.1 |
 |---|---:|---:|---:|
-| JPEG variants, large | 3.9 GiB | 96.7% | **22.6%** |
-| JPEG variants, huge | 14.3 GiB | — | **30.4%** |
-| PNG variants | 3.7 GiB | 39.7% | **33.7%** |
-| JPEG variants, medium | 3.5 GiB | 50.2% | **39.0%** |
-| Loose JPEGs (no variants) | 0.5 GiB | 98.9% | **83.5%** |
-| Loose PNGs (no variants) | 0.6 GiB | 84.2% | 84.2% |
+| PNG variants (53.9 GiB, whole collection) | 53.9 GiB | — | **16.3%** |
+| PNG variant set (one character) | 1.3 GiB | 26.8% | **10.2%** |
+| JPEG variants, medium | 10.6 GiB | 66.7% | **59.3%** |
+| PNG variants, mixed | 2.1 GiB | 42.0% | **37.2%** |
+| JPEG variants, medium | 2.7 GiB | 16.1% | **11.8%** |
+| JPEG variants, large | 13.8 GiB | 31.1% | **28.6%** |
+| Loose JPEGs (no variants) | 3.1 GiB | 80.8% | 80.6% |
 
-The full table, timings and per-codec byte breakdown are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Loose images barely move — there is no neighbour to delta against. The gain is
+concentrated in sets where many variants share one base drawing, and it scales with
+variant density.
 
-Two things drive most of the gain: content-aware grouping (same resolution does **not**
-mean same artwork, so groups are re-split by 32×32 thumbnail distance), and lossless
-JPEG repacking via JPEG XL for images that have no neighbour to delta against.
+A larger 15-collection corpus (84.2 GiB, 14 590 images) is benchmarked in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), together with timings and the per-codec
+byte breakdown.
+
+Three things drive most of the gain: content-aware grouping (same resolution does **not**
+mean same artwork, so groups are re-split by 32×32 thumbnail distance), a **reference
+tree inside each group** (each variant points at the most similar variant, not just one
+key), and lossless JPEG repacking via JPEG XL for images that have no neighbour to
+delta against.
 
 ## Features
 
-- **Delta coding against a per-group reference**, for JPEG, PNG, TIFF, WebP and raw RGBA.
+- **Delta coding against a per-group reference tree**: each variant points at the most
+  similar variant planned before it (depth 6 for lossy, 8 for lossless), not just one
+  group key. Works for JPEG, PNG, TIFF, WebP and raw RGBA.
 - **Per-image codec choice**: every entry independently falls back to `raw` if the delta
   is not smaller, so a bad grouping costs at most the wasted attempt, never size.
 - **JPEG XL lossless repacking** (`jpegxl` codec): JPEGs are transcoded to JXL and restored
