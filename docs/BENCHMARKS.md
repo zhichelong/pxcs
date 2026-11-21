@@ -99,25 +99,25 @@ depth capped at 6 for lossy residuals and 8 for lossless ones.
 Nine collections, 2026-11-20, same machine and thread count (12). `1.4.0` is the
 released GitHub build; `1.4.1` is this change.
 
-| Collection | Type | Source | 1.4.0 | 1.4.1 | Delta |
+| ID | Content | Size | 1.4.0 | 1.4.1 | Delta |
 |---|---|---:|---:|---:|---:|
-| sanhua full collection | PNG variant set | 53.9 GiB | — | **16.3%** | — |
-| sanhua sample (one character) | PNG variant set | 1.3 GiB | 26.8% | **10.2%** | -16.6 pt |
-| Unfairr | JPEG, medium variants | 10.6 GiB | 66.7% | **59.3%** | -7.3 pt |
-| lrrer | PNG, mixed | 2.1 GiB | 42.0% | **37.2%** | -4.8 pt |
-| gweda | JPEG, medium variants | 2.7 GiB | 16.1% | **11.8%** | -4.3 pt |
-| 玲殿下 | JPEG, large variants | 13.8 GiB | 31.1% | **28.6%** | -2.4 pt |
-| BBEX | PNG, mixed | 3.7 GiB | 39.5% | **38.1%** | -1.4 pt |
-| 梅原生 | PNG, loose images | 1.7 GiB | 77.0% | 76.2% | -0.7 pt |
-| Wlop | JPEG, loose images | 3.1 GiB | 80.8% | 80.6% | -0.2 pt |
-| Mango | JPEG, loose images | 1.5 GiB | 79.3% | 79.3% | 0.0 pt |
+| A16 | PNG, full variant collection | 53.9 GiB | — | **16.3%** | — |
+| A17 | PNG, one character, 177 variants | 1.3 GiB | 26.8% | **10.2%** | -16.6 pt |
+| A18 | JPEG, medium variants | 10.6 GiB | 66.7% | **59.3%** | -7.3 pt |
+| A19 | PNG, mixed | 2.1 GiB | 42.0% | **37.2%** | -4.8 pt |
+| A20 | JPEG, medium variants | 2.7 GiB | 16.1% | **11.8%** | -4.3 pt |
+| A21 | JPEG, large variants | 13.8 GiB | 31.1% | **28.6%** | -2.4 pt |
+| A22 | PNG, mixed | 3.7 GiB | 39.5% | **38.1%** | -1.4 pt |
+| A23 | PNG, loose images | 1.7 GiB | 77.0% | 76.2% | -0.7 pt |
+| A24 | JPEG, loose images | 3.1 GiB | 80.8% | 80.6% | -0.2 pt |
+| A25 | JPEG, loose images | 1.5 GiB | 79.3% | 79.3% | 0.0 pt |
 
 **Loose images gain nothing** — there is no neighbour to delta against, and the
 extra thumbnail pass costs a little. Variant-heavy collections gain 1.4–16.6
 points, and the gain scales with how many variants share the same base drawing.
 
 Speed is not monotonic. Smaller residuals compress faster, so most variant sets
-got *faster* (Unfairr 595s -> 496s, BBEX 1880s -> 1437s); a few lost ground
+got *faster* (A18 595s -> 496s, A22 1880s -> 1437s); a few lost ground
 because the tree encodes one depth layer at a time.
 
 The cost is decode depth: a cold single-image extraction of a depth-6 entry takes
