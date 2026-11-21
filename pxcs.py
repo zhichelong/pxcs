@@ -188,6 +188,12 @@ def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
         help=t("cli.residual_codec_help"),
     )
     parser.add_argument(
+        "--tree-depth",
+        type=int,
+        default=int(create_cfg.get("tree_depth", 0)),
+        help=t("cli.tree_depth_help"),
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help=t("cli.fast_help"),
@@ -640,6 +646,7 @@ def _command_create(args: argparse.Namespace, settings: dict) -> int:
         delta_quant=args.delta_quant,
         delta_quant_max=args.delta_quant_max,
         residual_codec=residual_codec,
+        tree_depth=int(args.tree_depth or 0),
         residual_min_zero_fraction=args.residual_min_zero,
         cluster_similar=not args.no_cluster,
         jpegxl=not args.no_jxl,

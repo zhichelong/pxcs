@@ -103,6 +103,51 @@ class ReferenceTreeTests(unittest.TestCase):
             max(depths), 2, f"小组退回了星形，depths={depths}"
         )
 
+    def test_tree_depth_one_forces_star(self) -> None:
+        """--tree-depth 1 等价于星形：所有成员都直接挂到 key。"""
+        self._make_cluster_chain()
+        archive = self.tmp / "d1.pxcs"
+        create_archive(
+            archive,
+            [str(self.src)],
+            CreateOptions(
+                quiet=True, progress=False, overwrite=True, tree_depth=1
+            ),
+        )
+        data = json.loads(list_entries(archive, as_json=True))
+        depths = [e["depth"] for e in data["entries"]]
+        self.assertEqual(max(depths), 1, f"tree_depth=1 仍建了深树: {depths}")
+
+    def test_tree_depth_two_caps_depth(self) -> None:
+        """--tree-depth 2 时任何条目都不应超过 depth 2。"""
+        for i, tint in enumerate((100, 101, 102, 103, 104, 105, 106, 107)):
+            _write_tinted(self.src / f"c{i}_p0.jpg", tint)
+        archive = self.tmp / "d2.pxcs"
+        create_archive(
+            archive,
+            [str(self.src)],
+            CreateOptions(
+                quiet=True, progress=False, overwrite=True, tree_depth=2
+            ),
+        )
+        data = json.loads(list_entries(archive, as_json=True))
+        depths = [e["depth"] for e in data["entries"]]
+        self.assertLessEqual(max(depths), 2, f"depth 超限: {depths}")
+        self.assertEqual(verify_archive(archive, threads=1).failed, 0)
+
+    def test_tree_depth_out_of_range_rejected(self) -> None:
+        """tree_depth 越界必须直接报错，而不是静默忽略。"""
+        from pxcs_core.archive import PxcsFormatError
+
+        _write_tinted(self.src / "x0_p0.jpg", 100)
+        with self.assertRaises(PxcsFormatError):
+            create_archive(
+                self.tmp / "bad.pxcs",
+                [str(self.src)],
+                CreateOptions(quiet=True, progress=False, overwrite=True,
+                              tree_depth=256),
+            )
+
     def test_no_cluster_keeps_star_topology(self) -> None:
         """--no-cluster 的语义是“整组对着首图”，不应悄悄变成参考树。"""
         self._make_cluster_chain()

@@ -129,25 +129,41 @@ def _row_score(row: np.ndarray, mod: int) -> int:
     return int(np.abs(signed).sum())
 
 
+def _row_scores(block: np.ndarray, mod: int) -> np.ndarray:
+    """一次算出所有行的 score，返回 shape (h,)。
+
+    与逐行调 ``_row_score`` 等价：只是把 (h,w,c) 的求和改成 ``axis=(1,2)``。
+    整数加法可交换，逐行求和与整块求和结果完全相同。
+    """
+    v = block.astype(np.int64)
+    half = mod // 2
+    signed = np.where(v >= half, v - mod, v)
+    return np.abs(signed).sum(axis=(1, 2))
+
+
 def choose_row_filters(tile: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """逐行选择滤波类型，返回 (types[H], filtered[H,W,C])。
 
     选择指标与 PNG 类似：最小化滤波后按有符号数解释的绝对值之和。
+
+    打分是整块向量化的（每 tile 只有 3 次大数组运算），不再逐行循环。
+    原先 3×H 次 Python 小数组操作在 128×128 tile 上会频繁争抢 GIL，
+    是 PXC 编码只有 4 线程扩展性的主因。
     """
     mod = _modulus(tile.dtype)
     h, w, c = tile.shape
     types = np.zeros(h, dtype=np.uint8)
     out = np.empty_like(tile)
-    best_scores: list[int | None] = [None] * h
-    # 一次只保留一个候选数组，避免 5 份 tile 同时驻留内存。
+    best_scores = np.full(h, np.iinfo(np.int64).max, dtype=np.int64)
+    # 一次只保留一个候选数组，避免多份 tile 同时驻留内存。
     for ft in FILTER_TYPES_FAST:
         f = filter_tile(tile, ft)
-        for y in range(h):
-            score = _row_score(f[y], mod)
-            if best_scores[y] is None or score < best_scores[y]:
-                best_scores[y] = score
-                types[y] = ft
-                out[y] = f[y]
+        scores = _row_scores(f, mod)
+        better = scores < best_scores
+        if better.any():
+            best_scores[better] = scores[better]
+            types[better] = ft
+            out[better] = f[better]
     return types, out
 
 

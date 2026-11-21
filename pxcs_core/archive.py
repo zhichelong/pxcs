@@ -185,6 +185,9 @@ class CreateOptions:
     # 同一分辨率的大组按缩略图再按内容切分（每个子簇一个 key）。
     # 关掉就是旧行为：整组只对着首图做差分。
     cluster_similar: bool = True
+    # 组内参考树的最大深度。0=按编码类别自动（有损 6 / 无损 8）。
+    # 调小可以缩短解码链（提取单张更快），调大可以继续压缩（上限 255）。
+    tree_depth: int = 0
     # JPEG 关键帧/散图是否走 JPEG XL 无损重打包（1.4 格式特性）。
     # 关掉可以保持 1.2 兼容（旧 exe 能读）。
     jpegxl: bool = True
@@ -845,6 +848,8 @@ def create_archive(
         raise PxcsFormatError(t("archive.option_residual_codec"))
     if not (0.0 <= opts.residual_min_zero_fraction <= 1.0):
         raise PxcsFormatError(t("archive.option_residual_min_zero"))
+    if not (0 <= opts.tree_depth <= 255):
+        raise PxcsFormatError(t("archive.option_tree_depth"))
     if opts.group_mode == "regex":
         try:
             re.compile(opts.group_regex)

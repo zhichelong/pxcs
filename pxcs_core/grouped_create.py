@@ -1505,11 +1505,15 @@ def create_grouped_archive(
                     # 整组都读不了：成员已逐个记为跳过，不提交差分。
                     continue
                 state.entry_of_member[state.key_index] = state.key_id
-                plan_depth = (
-                    TREE_MAX_DEPTH
-                    if _group_is_lossy(state.members)
-                    else TREE_MAX_DEPTH_LOSSLESS
-                )
+                if opts.tree_depth > 0:
+                    # 用户显式指定：有损/无损都按同一个上限规划。
+                    plan_depth = int(opts.tree_depth)
+                else:
+                    plan_depth = (
+                        TREE_MAX_DEPTH
+                        if _group_is_lossy(state.members)
+                        else TREE_MAX_DEPTH_LOSSLESS
+                    )
                 state.parents = _plan_reference_tree(
                     state.thumbs, state.key_index, plan_depth
                 )

@@ -24,6 +24,13 @@ layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
   reference, so its residual carries less quantization error to begin with.
 - Cost: a cold single-image extraction is ~2.2x slower at depth 6 than at depth 1
   (1.3s vs 0.6s per 4K entry); sequential extraction reuses the parent cache.
+- **`--tree-depth`**: the reference-tree depth is now configurable (1..255); `0` keeps
+  the automatic choice (6 lossy / 8 lossless). Lower values make single-image extraction
+  cheaper, higher values squeeze the archive further.
+- **Faster tile encoding**: `choose_row_filters` scores all rows in one vectorized pass
+  instead of a Python loop per row (3xH small-array calls per tile). Measured on a
+  2.1 GiB PNG-heavy set: 797s -> 473s (-41%), average parallelism 3.1 -> 4.5 cores,
+  with byte-identical output (all 21 golden vectors unchanged).
 - No format change: the same minors are written.
 
 ## 1.4.0
