@@ -122,3 +122,23 @@ because the tree encodes one depth layer at a time.
 
 The cost is decode depth: a cold single-image extraction of a depth-6 entry takes
 about 2.2x as long as a key frame. Sequential extraction reuses the parent cache.
+
+
+## 1.5.0: hardened reading, memory and speed adjustments
+
+The format and compression ratios are unchanged; what this release verifies is that
+hardening did not slow the normal path.
+
+| Metric | 1.4.1 | 1.5.0 |
+|---|---:|---:|
+| Archive size (60 JPEGs / 758 MiB) | 50.48 MiB | 50.48 MiB (+1 B from the random archive_id) |
+| Create time (interleaved A/B, two runs) | 37.9 / 37.1 s | 37.1 / 37.0 s |
+| `verify` full | 64.4 s | 58.0 s |
+| `verify` quick | 62.4 s | 0.35 s |
+| Create peak RSS | 5.9 GiB | 5.35 GiB |
+| Reference-tree planning peak (n=1000 / n=3000) | ~2 GB / 32 GB temporary | 5.9 MB / 17.7 MB |
+
+The `verify --quick` gap is not a 180x speedup: 1.4.1's quick still reconstructed residual
+chains (contradicting its help text), while 1.5.0's quick only checks payload CRC/SHA.
+That is a semantics fix, not a pure optimization. On the same archive, full verification
+still decodes everything and is about 10% faster.

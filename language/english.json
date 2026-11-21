@@ -86,7 +86,15 @@
     "create_verbose_help": "Print the reason for every skipped file (default: first 20 listed in the summary)",
     "no_self_check_help": "Skip the post-write self-check (by default the archive is reopened to confirm the index and entry count)",
     "memory_limit_help": "Memory budget for concurrent tasks, e.g. 4G / 2048M; 0=auto from available physical memory (default)",
-    "no_jxl_help": "Do not use JPEG XL lossless repacking (about 20%% larger, but new archives stay 1.2-compatible)"
+    "no_jxl_help": "Do not use JPEG XL lossless repacking (about 20%% larger, but new archives stay 1.2-compatible)",
+    "on_conflict_help": "On output path conflict: error=fail (default), skip=keep the first, rename=add a number",
+    "allow_expensive_kdf_help": "Allow KDF parameters above the default limit (checked before key derivation)",
+    "quant_list_help": "Explicit quantization steps, comma separated (e.g. 0,4,8,12,16,24); only for lossy 8-bit sources",
+    "quant_list_invalid": "Invalid quantization list: {value} (1-8 integers in 0..255)",
+    "verify_level_help": "Verification level: metadata=structure only, quick=payload CRC/SHA only, full=decode everything (default), source=also verify source bytes",
+    "preset_help": "Compression preset: lossless=pixel exact (no quantization), balanced=default, max=smaller but slower, custom=use individual flags",
+    "dry_run_help": "Scan and sample-estimate only; write no archive",
+    "report_quality_help": "Compute and report actual pixel error and PSNR for lossy entries (slower)"
   },
   "create": {
     "summary": "[OK] {path} | {original} -> {archive} ({ratio}) | {groups} groups / {keys} keys | {images} images ({deltas} deltas, {lossy} lossy, {raw} raw) | {files} files | {dups} dups | {elapsed}s{extra}",
@@ -109,7 +117,19 @@
     "memory_stats": "[INFO] Memory budget peak {peak} / limit {budget}; waited {waits} times on the budget",
     "skip_artifacts": "Skipped {count} .pxcs files/volumes (archive artifacts are not packed into new archives)",
     "similar_split": "[GROUP] {groups} resolution groups contain mixed content, split into sub-groups by thumbnail",
-    "groups_incomplete": "Internal error: only {done}/{total} image groups processed, archive is incomplete (aborted)"
+    "groups_incomplete": "Internal error: only {done}/{total} image groups processed, archive is incomplete (aborted)",
+    "peak_rss": "Peak memory: {rss}",
+    "memory_small": "[WARN] Memory budget is only {budget}; large images may queue or exceed it",
+    "lossy_quality": "{count} lossy deltas: max pixel error {max_error}, mean PSNR {psnr} dB (archive's approximate pixels)",
+    "preset_note": "[PRESET] {preset}: pixel-exact is not byte-exact; use extract --lossless for JPEG sources to keep pixels",
+    "depth_suffix": " | ref depth max {max} / mean {mean}",
+    "estimate_title": "[DRY-RUN] pre-create analysis",
+    "estimate_files": "Files {files} (images {images} / others {others}), image groups {groups}",
+    "estimate_dups": "Exact duplicates {duplicates}, saving {size}",
+    "estimate_size": "Original {original} -> estimated {estimated} (sample range {low} ~ {high})",
+    "estimate_sample": "Sampled {files} files ({size}); range is p10/p50/p90 of per-file encode ratios",
+    "estimate_advice": "Suggested threads {threads}, memory budget {memory}",
+    "estimate_encryption": "Note: the estimate ignores encryption overhead (KDF and AEAD headers)"
   },
   "scan": {
     "start": "[SCAN] Reading {count} image headers to collect resolutions..."
@@ -160,7 +180,10 @@
     "option_tile_size": "tile_size must be in 8..1024",
     "option_keyframe_interval": "keyframe_interval cannot be negative",
     "option_search_window": "search_window cannot be negative",
-    "jxl_decode": "JPEG XL restore failed: {path}: {reason}"
+    "jxl_decode": "JPEG XL restore failed: {path}: {reason}",
+    "chain_too_long": "Reference chain exceeds the limit: {path}",
+    "ref_not_ready": "Internal error: reference image is not decoded yet: {path}",
+    "option_quant_list": "quant_list must contain 1-8 integers in 0..255"
   },
   "codec": {
     "mode_no_delta": "Mode {mode} does not support delta",
@@ -170,7 +193,9 @@
     "zero_fraction": "Residual zero fraction too low ({zero} < {minimum})",
     "zlib_length": "zlib residual length mismatch: expected {expected}, got {actual}",
     "shape_mismatch": "Reference and residual image shapes differ",
-    "restore_hash": "Restored pixel hash mismatch: {path}"
+    "restore_hash": "Restored pixel hash mismatch: {path}",
+    "residual_without_ref": "zlib residual entry has no reference image",
+    "zlib_dtype": "zlib residual only supports 8-bit, got {dtype}"
   },
   "container": {
     "writer_closed": "writer is closed",
@@ -241,7 +266,12 @@
     "entry_missing": "Entry not found: {id}",
     "entry_data_short": "Entry data is truncated: {path}",
     "entry_crc": "Entry CRC check failed: {path}",
-    "entry_sha": "Entry SHA-256 check failed: {path}"
+    "entry_sha": "Entry SHA-256 check failed: {path}",
+    "entry_chain": "Reference chain too long (entry {id}, depth {depth})",
+    "entry_depth_link": "Entry {id} depth does not match its parent: expected {expected}, got {actual}",
+    "stream_encrypted": "Streaming payloads are not supported for encrypted archives",
+    "stream_short": "File shrank while being written: {path}",
+    "stream_changed": "File changed after it was scanned: {path}"
   },
   "crypto": {
     "missing_library": "Missing the cryptography dependency, cannot handle encrypted archives (pip install cryptography)",
@@ -262,7 +292,9 @@
     "names_encrypted": "File names encrypted",
     "names_plain": "File names not encrypted",
     "summary": "encryption: {kdf} + {aead} (m={p1}, t={p2}, p={p3}) | {names}",
-    "weak_password": "[WARN] Passphrase is shorter than 8 characters and weak; use a longer passphrase."
+    "weak_password": "[WARN] Passphrase is shorter than 8 characters and weak; use a longer passphrase.",
+    "unknown_flags": "Encryption header has unknown flag bits: {value}",
+    "kdf_too_expensive": "The archive asks for a KDF cost above the default limit: {kdf}(p1={p1}, p2={p2}, p3={p3}), limit {limit}. Re-run with --allow-expensive-kdf if the source is trusted."
   },
   "volume": {
     "none": "No volumes found",
@@ -313,13 +345,19 @@
     "quality_suffix": " | quality={quality}",
     "lossy_warning": "[WARN] {count} entries are lossy deltas; JPEG is re-encoded at q95 by default, and --lossless output is also quantized approximate pixels, not the original source JPEG pixels.",
     "skip_existing": "[SKIP] Already exists: {path}",
-    "done": "[DONE] Extracted {extracted} | skipped {skipped} | failed {failed} | {size}"
+    "done": "[DONE] Extracted {extracted} | skipped {skipped} | failed {failed} | {size}",
+    "target_conflict": "Two entries would write the same file: {first} and {second} -> {target} (use --on-conflict)",
+    "target_prefix": "Output path conflict: {first} is a file but {second} needs it as a directory",
+    "on_conflict_invalid": "Unknown conflict mode: {value}",
+    "skip_conflict": "[SKIP] Output path conflict, skipped: {path}"
   },
   "verify": {
     "pixel_hash_mismatch": "Pixel hash mismatch",
     "raw_sha_mismatch": "Raw image SHA-256 mismatch",
     "lossy_note": " | {count} lossy deltas (only the archive's approximate pixels are checked)",
-    "summary": "[VERIFY] Checked {checked}/{total} | failed {failed}{extra}"
+    "summary": "[VERIFY] Checked {checked}/{total} | failed {failed}{extra}",
+    "level_suffix": " | level {level}",
+    "level_unknown": "Unknown verification level: {level}"
   },
   "progress": {
     "title": "Compressing {title}",
@@ -339,7 +377,8 @@
     "detail_dup": "[DUP ] {path} -> #{ref}",
     "detail_raw": "[RAW ] {path} | {size}",
     "detail_raw_source": "[RAW ] {path} | {size} | original stream",
-    "detail_raw_fallback": "[RAW ] {path} | pixel PXC larger than source, falling back to raw stream"
+    "detail_raw_fallback": "[RAW ] {path} | pixel PXC larger than source, falling back to raw stream",
+    "eta": "ETA         {eta}"
   },
   "paths": {
     "empty": "Empty path",
@@ -360,6 +399,13 @@
     "conflict": "Path conflict in archive: {path} from {first} and {second}",
     "not_file_or_dir": "Not a file or directory: {path}",
     "no_files": "No files to pack in the input"
+  },
+  "zlib": {
+    "bad_stream": "Corrupt zlib stream ({label}): {reason}",
+    "limit": "Decompressed data exceeds the {limit} byte limit ({label})",
+    "incomplete": "Incomplete zlib stream ({label})",
+    "trailing": "Trailing data after the zlib stream: {size} bytes ({label})",
+    "length": "Decompressed length mismatch: expected {expected}, got {actual} ({label})"
   },
   "settings": {
     "bad_config": "[WARN] Could not read config file, ignored: {path} ({error})"

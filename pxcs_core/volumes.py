@@ -616,16 +616,48 @@ class VolumeSink(ArchiveSink):
             os.fsync(fh.fileno())
             fh.close()
         self._closed = True
-        # 2. 全部落盘后再改名，避免中途失败留下“半套”正式文件名。
-        finalized: list[Path] = []
-        for info in self._volumes:
-            final = info["path"]
-            os.replace(info["tmp"], final)
-            finalized.append(final)
-        self.volume_paths = finalized
+        # 2. 先把旧卷改名备份，再逐个提交新卷。
+        #    单文件里 os.replace 是原子的；多卷没有这个性质：中途失败会留下
+        #    "新 001 + 旧 002" 的混合体，旧归档被毁、新归档不完整。这里用
+        #    备份 + 回滚把失败收敛回旧版本。
+        suffix = f".bak-{self.archive_id.hex()[:8]}"
+        backups: list[tuple[Path, Path]] = []
+        committed: list[Path] = []
+        try:
+            for info in self._volumes:
+                final = info["path"]
+                if final.exists():
+                    backup = final.with_name(final.name + suffix)
+                    os.replace(final, backup)
+                    backups.append((final, backup))
+            for info in self._volumes:
+                final = info["path"]
+                os.replace(info["tmp"], final)
+                committed.append(final)
+        except BaseException:
+            # 回滚：先撤掉已提交的新卷，再把备份还原；失败只影响旧标签，
+            # 不让混合状态留在正式文件名上。
+            for final in committed:
+                try:
+                    final.unlink()
+                except OSError:
+                    pass
+            for final, backup in backups:
+                try:
+                    if not final.exists():
+                        os.replace(backup, final)
+                except OSError:
+                    pass
+            raise
+        for _final, backup in backups:
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+        self.volume_paths = [info["path"] for info in self._volumes]
         # 3. 覆盖模式下删除多出来的旧分卷，避免下次读取时数量对不上。
-        self._remove_stale(len(finalized))
-        return finalized[0], total, finalized
+        self._remove_stale(len(self.volume_paths))
+        return self.volume_paths[0], total, self.volume_paths
 
     def _remove_stale(self, count: int) -> None:
         if not self.overwrite:

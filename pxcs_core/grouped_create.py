@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
+import hashlib
 import os
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -76,6 +78,7 @@ from .limits import (
     estimate_key_retention,
     estimate_raw_lease,
     estimate_working_set,
+    peak_rss_bytes,
     resolve_memory_budget,
     resolve_parallel_groups,
     resolve_threads,
@@ -229,6 +232,9 @@ class _Result:
     mode: str = ""
     image: Optional[ImageData] = None
     error: str = ""
+    # 有损量化后与原始像素的偏差（只在选中候选上算一次）。
+    max_error: int = 0
+    psnr: float = 0.0
 
 
 @dataclass
@@ -275,6 +281,30 @@ def _split_groups(items: list[WorkItem]) -> list[list[WorkItem]]:
     if current:
         groups.append(current)
     return groups
+
+
+def _compare_stats(ref: np.ndarray, approx: np.ndarray) -> tuple[int, float]:
+    """分块算 max|diff| 与 PSNR；不额外分配整图临时数组。"""
+    import math
+
+    rows = 256
+    height = min(ref.shape[0], approx.shape[0])
+    max_error = 0
+    sse = 0.0
+    count = 0
+    for start in range(0, height, rows):
+        a = ref[start:start + rows].astype(np.int32)
+        b = approx[start:start + rows].astype(np.int32)
+        d = a - b
+        if d.size:
+            max_error = max(max_error, int(np.abs(d).max()))
+            sse += float(np.square(d).sum())
+            count += d.size
+    if count == 0:
+        return max_error, 0.0
+    mse = sse / count
+    psnr = float("inf") if mse <= 0 else 10.0 * math.log10(255.0 * 255.0 / mse)
+    return max_error, psnr
 
 
 def _image_sha(image: ImageData) -> str:
@@ -558,10 +588,67 @@ TREE_MAX_CHILDREN = 8
 _LOSSY_SOURCE_EXTS = {".jpg", ".jpeg", ".webp"}
 
 
+# 超过这个大小的非图片文件不再整块读入 + zlib 二次压缩：
+# 大文件（视频/压缩包/镜像）本来就压不动，整读既占内存又白费 CPU。
+# 改为流式 store：两遍读（第一遍算哈希用于去重，第二遍写入）。
+_STREAM_FILE_THRESHOLD = 64 * 1024 * 1024
+_STREAM_CHUNK = 1 << 20
+
+
+def _hash_file_streaming(path: Path, size: int) -> tuple[int, str]:
+    """分块算 crc32 + sha256，不把文件读进内存。"""
+    crc = 0
+    digest = hashlib.sha256()
+    remaining = int(size)
+    with path.open("rb") as fh:
+        while remaining > 0:
+            chunk = fh.read(min(_STREAM_CHUNK, remaining))
+            if not chunk:
+                raise OSError(f"file shrank while reading: {path}")
+            crc = zlib.crc32(chunk, crc)
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return crc & 0xFFFFFFFF, digest.hexdigest()
+
+
+def _looks_compressible(path: Path, size: int) -> bool:
+    """抽样判断大文件值不值得压缩。
+
+    大文件一律 store 会把"65 MB 日志压到 1 MB"也放弃掉，压缩率代价太大；
+    一律压缩又会让视频/压缩包白烧 CPU。取首/中/尾各 256 KiB，用 zlib
+    最低档试压，总体比例低于 90% 才认为值得走流式压缩。
+    """
+    sample = 256 * 1024
+    points = [0, max(0, size // 2 - sample // 2), max(0, size - sample)]
+    raw_total = 0
+    comp_total = 0
+    try:
+        with path.open("rb") as fh:
+            for point in points:
+                fh.seek(point)
+                data = fh.read(min(sample, size - point))
+                if not data:
+                    continue
+                raw_total += len(data)
+                comp_total += len(zlib.compress(data, 1))
+    except OSError:
+        return False
+    if raw_total <= 0:
+        return False
+    return comp_total < raw_total * 0.9
+
+
 def _group_is_lossy(items: list[WorkItem]) -> bool:
-    """组内是否走有损差分：只看源文件格式，PNG/BMP/TIFF 都走无损残差。"""
+    """组内是否走有损差分：看源像素本身是否已经有损。
+
+    JPEG 一律有损；WebP 要按编码方式判断（无损 WebP 量化会改像素）。
+    探针缺失时才退回扩展名判断。
+    """
     if not items:
         return False
+    probe = items[0].probe
+    if probe is not None:
+        return bool(probe.lossy)
     return items[0].source.path.suffix.lower() in _LOSSY_SOURCE_EXTS
 
 
@@ -578,6 +665,9 @@ def _plan_reference_tree(
 
     距离用 32x32 灰度缩略图的平均绝对差。实测它与全分辨率逐像素相同率
     单调对应（99.8% 相同 ≈ 0.08，91% ≈ 5.5），足够选出正确的前驱。
+
+    ``max_children`` 只约束非 key 父节点：找不到合法父节点时一律回退到 key，
+    key 常驻内存、重复解码代价低，允许它超过上限。
     """
     n = len(thumbs)
     parents = [-1] * n
@@ -590,18 +680,20 @@ def _plan_reference_tree(
         return parents
 
     grid = np.stack([t for t in thumbs if t is not None]).astype(np.int16)
-    # (n, n) 平均绝对差矩阵；n 是单个分辨率组的成员数，量级 <= 数百。
-    dist = np.abs(grid[:, None, :, :] - grid[None, :, :, :]).mean(axis=(2, 3))
-
+    # 逐行算距离，不一次性生成 (n, n, 32, 32) 的四维差矩阵：
+    # n=1000 时旧写法要 2 GB 临时量，n=4000 时 32 GB，一个组就能把进程打死。
+    # 每行只需要 (n, 32, 32) 的临时量，n=4000 也就 8 MB。
     depths = [0] * n
     children = [0] * n
     for i in range(key_index + 1, n):
+        row = grid[i]
+        dist_i = np.abs(grid - row).mean(axis=(1, 2))
         best_parent = key_index
-        best_dist = float(dist[i, key_index])
+        best_dist = float(dist_i[key_index])
         for j in range(key_index, i):
             if depths[j] >= max_depth or children[j] >= max_children:
                 continue
-            d = float(dist[i, j])
+            d = float(dist_i[j])
             if d < best_dist:
                 best_parent, best_dist = j, d
         parents[i] = best_parent
@@ -690,15 +782,25 @@ def _encode_delta_body(
             reason="delta_not_allowed", image=image, keep_image=keep_image,
         )
 
-    is_lossy_image = src_format in _RAW_IMAGE_FORMATS
+    is_lossy_image = src_format in _RAW_IMAGE_FORMATS and (
+        item.probe.lossy if item.probe is not None else True
+    )
     quant_base = (
         int(opts.delta_quant)
         if is_lossy_image and image.data.dtype == np.dtype(np.uint8)
         else 0
     )
-    quant_values = [quant_base]
-    if quant_base > 0 and opts.delta_quant_max > quant_base:
-        quant_values.append(int(opts.delta_quant_max))
+    if opts.quant_list:
+        # 显式档位只对有损 8-bit 源生效；无损源永远只有 q=0。
+        quant_values = (
+            [int(q) for q in opts.quant_list]
+            if is_lossy_image and image.data.dtype == np.dtype(np.uint8)
+            else [0]
+        )
+    else:
+        quant_values = [quant_base]
+        if quant_base > 0 and opts.delta_quant_max > quant_base:
+            quant_values.append(int(opts.delta_quant_max))
 
     best_payload: Optional[bytes] = None
     best_hash = ""
@@ -740,7 +842,8 @@ def _encode_delta_body(
             best_approx = approx
             best_quant = quant
             best_codec = codec
-        if src_size <= 0 or len(payload) < src_size * 0.98:
+        # 显式档位要求"都试一遍再选最小"；默认走自适应时才提前收手省时间。
+        if not opts.quant_list and (src_size <= 0 or len(payload) < src_size * 0.98):
             break
 
     if (
@@ -755,6 +858,15 @@ def _encode_delta_body(
             image=image,
             keep_image=keep_image,
         )
+
+    max_error = 0
+    psnr = 0.0
+    if (
+        best_quant > 0
+        and best_approx is not None
+        and (opts.report_quality or opts.quant_list)
+    ):
+        max_error, psnr = _compare_stats(image.data, best_approx.data)
 
     return _Result(
         item=item,
@@ -774,6 +886,8 @@ def _encode_delta_body(
         mode=image.mode,
         # 子节点差分要用“解码时会得到的像素”；有损量化下它和原始像素不同。
         image=best_approx if keep_image else None,
+        max_error=max_error,
+        psnr=psnr,
     )
 
 
@@ -839,7 +953,9 @@ def _write_result(
                 mtime_ns=st.st_mtime_ns,
                 source_sha256=source_sha,
                 ref=raw_hash_index[source_sha],
-                depth=1,
+                # DUP 也参与引用链：depth 必须是父条目 +1，不能写死 1，
+                # 否则容器加载时的链深校验会拒绝自己写出的归档。
+                depth=ref_entry.depth + 1,
                 width=result.width,
                 height=result.height,
                 mode=result.mode,
@@ -903,9 +1019,18 @@ def _self_check_archive(
     情况下当场报错，而不是等下次 verify 才发现。
     """
     try:
-        with ArchiveReader(path, password=password) as reader:
-            found = len(reader.entries)
-            index_length = int(reader.header.index_length)
+        # 自己刚写的归档：允许用创建时指定的高开销 KDF 参数自检，
+        # 否则"用自定义参数创建成功、自检却打不开"会互相矛盾。
+        from .crypto import allow_expensive_kdf, set_allow_expensive_kdf
+
+        previous = allow_expensive_kdf()
+        set_allow_expensive_kdf(True)
+        try:
+            with ArchiveReader(path, password=password) as reader:
+                found = len(reader.entries)
+                index_length = int(reader.header.index_length)
+        finally:
+            set_allow_expensive_kdf(previous)
     except Exception as exc:  # 任何异常都说明产物不可信
         raise PxcsSelfCheckError(
             t("create.self_check_failed", reason=f"{type(exc).__name__}: {exc}")
@@ -928,6 +1053,12 @@ def _print_summary(stats: CreateStats, path: Path, opts: CreateOptions) -> None:
     extra = ""
     if stats.volumes > 1:
         extra += t("create.volumes_suffix", count=stats.volumes)
+    if stats.deltas:
+        extra += t(
+            "create.depth_suffix",
+            max=stats.max_depth,
+            mean=f"{stats.mean_depth:.1f}",
+        )
     if opts.password:
         extra += t(
             "create.encrypted_suffix"
@@ -935,6 +1066,18 @@ def _print_summary(stats: CreateStats, path: Path, opts: CreateOptions) -> None:
             else "create.encrypted_plain_suffix"
         )
     print(summary_text(stats, path, extra))
+    if stats.quality_reported:
+        mean_psnr = stats.psnr_sum / max(1, stats.quality_reported)
+        print(
+            t(
+                "create.lossy_quality",
+                count=stats.lossy_deltas,
+                max_error=stats.max_pixel_error,
+                psnr=f"{mean_psnr:.2f}",
+            )
+        )
+    if stats.peak_rss_bytes:
+        print(t("create.peak_rss", rss=human_size(stats.peak_rss_bytes)))
     if stats.skipped:
         print(t("create.skipped_warning", count=stats.skipped))
         shown = stats.errors[:20]
@@ -976,6 +1119,15 @@ def create_grouped_archive(
     threads = resolve_threads(opts.threads)
     budget_bytes = resolve_memory_budget(opts.memory_limit_mb)
     budget = MemoryBudget(budget_bytes)
+    if opts.memory_limit_mb and not opts.quiet:
+        # 显式给小预算以前会被静默抬到 512 MiB；现在按用户值执行，但要提醒后果。
+        if budget_bytes < 512 * 1024 * 1024:
+            print(
+                t(
+                    "create.memory_small",
+                    budget=human_size(budget_bytes),
+                )
+            )
 
     set_level = None
     from .codec import set_zlib_level as set_level  # local import keeps startup light
@@ -1355,13 +1507,17 @@ def create_grouped_archive(
                 parent = state.parents[index] if index < len(state.parents) else -1
                 if parent >= 0 and parent in state.entry_of_member:
                     ref_id_for_entry = state.entry_of_member[parent]
-                    ref_depth_for_entry = (
-                        state.depths[parent] if index < len(state.depths) else 0
-                    )
                 else:
                     # 规划失败/父条目被跳过：退回星形，保证 ref 始终有效。
                     ref_id_for_entry = state.key_id
-                    ref_depth_for_entry = state.key_depth
+                # depth 一律按**实际** ref 条目算，不能沿用规划时的层深：
+                # 父条目被跳过时 ref 会退到 key，沿用的 depth 就比真实链深大，
+                # 加载端的链深校验会拒绝这个归档。
+                ref_depth_for_entry = (
+                    entries[ref_id_for_entry].depth
+                    if ref_id_for_entry is not None and ref_id_for_entry < len(entries)
+                    else 0
+                )
             try:
                 written, is_dup = _write_result(
                     writer,
@@ -1401,6 +1557,12 @@ def create_grouped_archive(
                     stats.deltas += 1
                     if entry.lossy:
                         stats.lossy_deltas += 1
+                        if result.psnr > 0:
+                            stats.quality_reported += 1
+                            stats.max_pixel_error = max(
+                                stats.max_pixel_error, int(result.max_error)
+                            )
+                            stats.psnr_sum += float(result.psnr)
                 elif entry.codec in {CODEC_PXC, CODEC_WEBP_LOSSLESS}:
                     stats.keyframes += 1
             if entry.codec in RESIDUAL_CODECS:
@@ -1431,8 +1593,63 @@ def create_grouped_archive(
     def write_files(group: list[WorkItem]) -> None:
         nonlocal done_entries, processed_bytes
         for item in group:
+            path = item.source.path
             try:
-                raw = item.source.path.read_bytes()
+                size = path.stat().st_size
+            except OSError as exc:
+                record_skipped(item, f"{type(exc).__name__}: {exc}")
+                continue
+            if size >= _STREAM_FILE_THRESHOLD and opts.password is None:
+                # 大文件：两遍流式（算哈希 -> 写 store），任何一遍都不整读。
+                try:
+                    raw_crc, source_sha = _hash_file_streaming(path, size)
+                except OSError as exc:
+                    record_skipped(item, f"{type(exc).__name__}: {exc}")
+                    continue
+                if source_sha in raw_hash_index:
+                    ref_id = raw_hash_index[source_sha]
+                    ref = entries[ref_id]
+                    if ref.kind == "file":
+                        entry = _make_entry(
+                            len(entries), item.source.rel, "file", CODEC_DUP,
+                            size=size, mtime_ns=path.stat().st_mtime_ns,
+                            source_sha256=source_sha, ref=ref_id,
+                            depth=ref.depth + 1,
+                            format_name=_source_format(path),
+                            ext=_source_ext(path), reason="duplicate",
+                        )
+                        entries.append(entry)
+                        stats.dups += 1
+                        stats.files += 1
+                        done_entries += 1
+                        processed_bytes += entry.size
+                        update_progress(item.source.rel)
+                        continue
+                level = opts.zlib_level if _looks_compressible(path, size) else None
+                try:
+                    info = writer.add_stream(path, size, compress_level=level)
+                except (PxcError, OSError) as exc:
+                    record_skipped(item, f"{type(exc).__name__}: {exc}")
+                    continue
+                codec = CODEC_ZLIB if level is not None else CODEC_STORE
+                entry = _make_entry(
+                    len(entries), item.source.rel, "file", codec,
+                    size=size, mtime_ns=path.stat().st_mtime_ns,
+                    source_sha256=info[5],
+                    payload_info=(info[0], info[1], None, info[2], info[3]),
+                    raw_crc32=info[4], format_name=_source_format(path),
+                    ext=_source_ext(path),
+                    reason="zlib_stream" if level is not None else "store_stream",
+                )
+                entries.append(entry)
+                raw_hash_index.setdefault(info[5], entry.id)
+                stats.files += 1
+                done_entries += 1
+                processed_bytes += entry.size
+                update_progress(item.source.rel)
+                continue
+            try:
+                raw = path.read_bytes()
             except OSError as exc:
                 record_skipped(item, f"{type(exc).__name__}: {exc}")
                 continue
@@ -1445,7 +1662,8 @@ def create_grouped_archive(
                     entry = _make_entry(
                         len(entries), item.source.rel, "file", CODEC_DUP,
                         size=len(raw), mtime_ns=item.source.path.stat().st_mtime_ns,
-                        source_sha256=source_sha, ref=ref_id, depth=1,
+                        source_sha256=source_sha, ref=ref_id,
+                        depth=ref.depth + 1,
                         format_name=_source_format(item.source.path),
                         ext=_source_ext(item.source.path), reason="duplicate",
                     )
@@ -1586,7 +1804,17 @@ def create_grouped_archive(
             _self_check_archive(final_path, len(entries), opts.password)
         stats.archive_bytes = archive_size
         stats.volumes = len(writer.output_files)
+        # 引用深度只统计差分条目：key/raw 的 depth=0 会把均值稀释得没意义。
+        residual_depths = [
+            e.depth for e in entries if e.codec in RESIDUAL_CODECS
+        ]
+        stats.max_depth = max(residual_depths, default=0)
+        stats.mean_depth = (
+            sum(residual_depths) / len(residual_depths) if residual_depths else 0.0
+        )
         stats.elapsed = time.perf_counter() - started
+        # 真实进程峰值，用来和 budget.peak（内部记账）对照。
+        stats.peak_rss_bytes = peak_rss_bytes()
         progress.update(len(work_items), current_name or str(input_paths[0]),
                         total_source, archive_size)
         progress.finish()

@@ -82,6 +82,7 @@ from .format import (
 )
 from .paths import normalize_rel_path
 from .volumes import ArchiveSink, ArchiveSource, open_source, volume_path
+from .zlibsafe import MAX_INDEX_BYTES, decompress_bounded
 
 
 class PxcsFormatError(PxcFormatError):
@@ -102,6 +103,8 @@ _VALID_IMAGE_CODECS = {
 }
 _VALID_FILE_CODECS = FILE_CODECS
 _HEX_LEN = 64
+# add_stream 每次读写的块大小。
+_STREAM_CHUNK = 1 << 20
 
 DATA_OFFSET_PLAIN = HEADER_SIZE
 DATA_OFFSET_CRYPTO = HEADER_SIZE + CRYPTO_HEADER_SIZE
@@ -317,6 +320,78 @@ class ArchiveWriter:
     def position(self) -> int:
         """当前已写入的逻辑字节数（含 header/payload，不含 index/footer）。"""
         return self.sink.tell()
+
+    # ------------------------------------------------------------- streaming
+    def add_stream(
+        self, path: Path, size: int, *, compress_level: Optional[int] = None
+    ) -> tuple[int, int, int, str, int, str]:
+        """把文件按块写入 payload 区，不把整个文件读进内存。
+
+        ``compress_level`` 非空时边读边 zlib 压缩（大文本/日志），为空时原样
+        store（视频/压缩包）。返回值：
+
+        ``(offset, 存储长度, 存储 CRC32, 存储 SHA-256, 原始 CRC32, 原始 SHA-256)``
+
+        仅用于未加密归档：加密是"每条 payload 一个 AEAD 消息"，必须整块
+        缓冲才能生成 nonce/tag，所以这里明确拒绝而不是偷偷退化成整读。
+        """
+        if self._closed:
+            raise RuntimeError(t("container.writer_closed"))
+        if self.crypto is not None:
+            raise PxcsFormatError(t("container.stream_encrypted"))
+        size = int(size)
+        if size < 0:
+            raise PxcsFormatError(t("container.entry_size"))
+        pos = self.sink.tell()
+        padding = (-pos) % 8
+        if padding:
+            self.sink.write(b"\x00" * padding)
+            pos += padding
+        comp = None
+        if compress_level is not None:
+            comp = zlib.compressobj(max(1, min(9, int(compress_level))))
+        crc_raw = 0
+        sha_raw = hashlib.sha256()
+        crc_out = 0
+        sha_out = hashlib.sha256()
+
+        def emit(data: bytes) -> None:
+            nonlocal crc_out
+            if not data:
+                return
+            crc_out = zlib.crc32(data, crc_out)
+            sha_out.update(data)
+            self.sink.write(data)
+
+        remaining = size
+        with Path(path).open("rb") as fh:
+            while remaining > 0:
+                chunk = fh.read(min(_STREAM_CHUNK, remaining))
+                if not chunk:
+                    raise PxcsFormatError(
+                        t("container.stream_short", path=str(path))
+                    )
+                crc_raw = zlib.crc32(chunk, crc_raw)
+                sha_raw.update(chunk)
+                emit(comp.compress(chunk) if comp is not None else chunk)
+                remaining -= len(chunk)
+            if comp is not None:
+                emit(comp.flush())
+            # 扫描后文件变长（日志/正在写入的文件）：宁可报错，不要写出
+            # 一个 size 与内容对不上的归档。
+            if fh.read(1):
+                raise PxcsFormatError(
+                    t("container.stream_changed", path=str(path))
+                )
+        length = self.sink.tell() - pos
+        return (
+            pos,
+            length,
+            crc_out & 0xFFFFFFFF,
+            sha_out.hexdigest(),
+            crc_raw & 0xFFFFFFFF,
+            sha_raw.hexdigest(),
+        )
 
     # ------------------------------------------------------------- finish
     def finish(self, entries: list[ArchiveEntry], flags: int) -> tuple[Path, int]:
@@ -735,6 +810,27 @@ class ArchiveReader:
                 ):
                     raise PxcsFormatError(t("container.ref_pixel"))
 
+        # 声明 depth 必须等于父条目 depth+1。ref < id 只保证"无环"，不保证
+        # 链长：把 1200 层的引用链每条都标成 depth=1，元数据上看只有一层，
+        # 解码端却要递归 1200 次。这里按索引顺序迭代算出真实链深并逐条核对。
+        chain_depths: list[int] = []
+        for entry in entries:
+            real_depth = 0 if entry.ref is None else chain_depths[entry.ref] + 1
+            if real_depth > MAX_DEPTH:
+                raise PxcsFormatError(
+                    t("container.entry_chain", id=entry.id, depth=real_depth)
+                )
+            if entry.depth != real_depth:
+                raise PxcsFormatError(
+                    t(
+                        "container.entry_depth_link",
+                        id=entry.id,
+                        expected=real_depth,
+                        actual=entry.depth,
+                    )
+                )
+            chain_depths.append(real_depth)
+
         self.header = ArchiveHeader(
             version_major=major,
             version_minor=minor,
@@ -781,15 +877,8 @@ class ArchiveReader:
 
 
 def _zlib_decompress(blob: bytes) -> bytes:
-    try:
-        dec = zlib.decompressobj()
-        out = dec.decompress(blob, 256 * 1024 * 1024 + 1)
-        out += dec.flush()
-        if len(out) > 256 * 1024 * 1024 or dec.unconsumed_tail:
-            raise PxcsFormatError(t("container.index_unzip_size"))
-        return out
-    except zlib.error as exc:
-        raise PxcsCorruptionError(t("container.index_zlib_failed", reason=exc)) from exc
+    """索引解压：长度上限固定，超限/尾部垃圾/提前结束都按损坏处理。"""
+    return decompress_bounded(blob, limit=MAX_INDEX_BYTES, label="index")
 
 
 def compute_flags(entries: list[ArchiveEntry]) -> int:

@@ -3,6 +3,83 @@
 Format minors 0-4 are all readable. This file records feature-level changes; the byte
 layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
+## 1.5.0
+
+No archive-format change (minor is still 4). This release is about the boundary when
+reading untrusted archives, plus lower memory use and more visibility before/after create.
+
+**Security and data integrity**
+
+- **Bounded zlib decompression**: index, residual and plain-file decoders now share
+  `pxcs_core/zlibsafe.py`. The old code capped only the first `decompress()` call and then
+  called `flush()`, which expands the remaining input without a limit - a 1 MB blob could
+  demand 1 GiB of RAM. The new path fixes the limit up front, stops on the first byte over
+  it, and checks stream end, trailing bytes and the exact expected length.
+- **Reference-chain validation**: the index loader now computes the real chain depth
+  iteratively and requires `depth == parent.depth + 1`, capped at 255. Previously only
+  `ref < id` was checked, so a forged `depth` could disguise a 1200-level chain as one
+  level and turn decoding into a `RecursionError`. Image and DUP resolution are iterative.
+- **KDF read limits**: Argon2id parameters above 512 MiB / 8 passes / 8 lanes are rejected
+  by default (scrypt: `log2N<=18, r<=8, p<=4`), before any key derivation, with the actual
+  parameters in the error. `--allow-expensive-kdf` opts in. Unknown crypto-header flag bits
+  are rejected instead of ignored.
+- **Lossless WebP detection**: RIFF chunks (`VP8L` / `VP8 `) decide whether the source is
+  lossless. Lossless WebP is now treated as pixel-exact; previously it was quantized and
+  2.4% of pixels changed in our test. Lossy WebP behaves as before.
+- **Residual type safety**: `zlib_residual` only accepts 8-bit samples. `--fast` on 16-bit
+  PNGs used to produce an archive that could be created but not decoded; encoding now
+  rejects it and falls back to PXC residuals.
+- **Extraction path conflicts**: all output paths are planned before touching the disk.
+  Under `--lossless`, `a.jpg` and `a.png` both map to `a.png`; the old code silently
+  skipped the second entry. It now fails by default, with `--on-conflict skip|rename`.
+
+**Performance and memory**
+
+- **Chunked reference-tree planning**: no `(n, n, 32, 32)` distance matrix. That temporary
+  was about 2 GB at n=1000 and 32 GB at n=3000; chunked planning peaks at 5.9 MB / 17.7 MB
+  with identical parent choices.
+- **Fewer full-image copies**: quantization writes back in slabs, centering is in-place,
+  zlib reads a `memoryview`, and residual decoding no longer copies.
+- **Memory-budget semantics**: an explicit small `--memory-limit` is no longer silently
+  raised to 512 MiB (floor 16 MiB). Peak RSS is recorded (Windows `GetProcessMemoryInfo`,
+  Linux `VmHWM`) and printed in the create summary. The decode cache is bounded by bytes as
+  well as by entry count.
+- **Streaming for large files**: non-image files of 64 MiB or more are no longer read whole
+  and recompressed. Three 256 KiB samples decide whether streaming zlib is worthwhile;
+  otherwise the file is streamed as store. Two passes (hash, then write) keep dedup working.
+  Encrypted archives keep the buffered path because AEAD needs whole payloads.
+
+**Usability**
+
+- `--preset lossless|balanced|max|custom`.
+- `--dry-run`: scan, exact duplicate count, whole-group sampling through a real encode, and
+  a size range (p10/p50/p90) plus suggested threads/memory. Writes nothing.
+- `--quant-list 0,4,8,12,16,24`: explicit quantization steps, all evaluated before picking
+  the smallest; `--report-quality` adds real max error and PSNR for lossy entries (off by
+  default: a full-image comparison is expensive on 4K images).
+- `verify --level metadata|quick|full|source`; `quick` no longer reconstructs images, which
+  the old implementation did despite the help text.
+- Progress ETA, peak RSS and max/mean reference depth in summaries.
+
+**Compatibility**
+
+- Archive format unchanged (`VERSION_MINOR` stays 4); older readers can read new archives.
+- Reading is stricter: length mismatches, trailing bytes, forged depth, unknown KDF
+  parameters and unknown flag bits now fail clearly - those files were already broken.
+- Archives created with custom expensive KDF parameters need `--allow-expensive-kdf`.
+- New archives for lossless WebP sources are a bit larger, which is the cost of
+  pixel-exactness.
+
+**Verification**
+
+- 267 tests (208 before), including zlib bombs, reference chains, lossless WebP, path
+  conflicts, KDF limits, volume rollback and dry-run.
+- 60 JPEGs (758 MiB) against v1.4.1: identical archive size (1 byte from the random
+  archive_id), create time indistinguishable in an interleaved A/B run,
+  `verify --level full` about 10% faster, create peak RSS 4-9% lower.
+  `verify --quick` dropped from 62 s to 0.35 s, and its semantics changed: it really does
+  not reconstruct images now.
+
 ## 1.4.1
 
 - **In-group reference tree**: after thumbnail clustering, each member now references the

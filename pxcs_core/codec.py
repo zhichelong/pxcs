@@ -30,6 +30,7 @@ from pxc_core.image_io import (
 )
 
 from .container import ArchiveEntry
+from .zlibsafe import decompress_bounded
 
 
 class PxcsImageError(PxcError):
@@ -167,7 +168,11 @@ def center_residual(residual: ImageData) -> ImageData:
     """无损地把差分平移到以 128 为中心；8-bit 模式专用。"""
     if residual.data.dtype != np.dtype(np.uint8):
         return residual
-    data = np.ascontiguousarray(np.add(residual.data, 128, dtype=np.uint8))
+    data = residual.data
+    if not data.flags.writeable:
+        data = data.copy()
+    np.add(data, 128, out=data, dtype=np.uint8)
+    data = np.ascontiguousarray(data)
     return replace(
         residual,
         data=data,
@@ -178,11 +183,23 @@ def center_residual(residual: ImageData) -> ImageData:
 
 
 def quantize_residual(residual: ImageData, quant: int) -> ImageData:
-    """有损量化“居中差分”；quant=0 时不改变像素。"""
+    """有损量化“居中差分”；quant=0 时不改变像素。
+
+    LUT 映射分块原地写回：``lut[data]`` 会先分配一整张同尺寸临时数组，
+    100 MP 的图就是 300 MB 的额外峰值。按 256 行一块处理，临时量只有一块。
+    """
     if quant <= 0 or residual.data.dtype != np.dtype(np.uint8):
         return residual
     lut = _quant_lut(quant)
-    data = np.ascontiguousarray(lut[residual.data])
+    data = residual.data
+    if not data.flags.writeable:
+        data = data.copy()
+    rows = 256
+    height = data.shape[0]
+    for start in range(0, height, rows):
+        slab = data[start:start + rows]
+        slab[...] = lut[slab]
+    data = np.ascontiguousarray(data)
     return replace(
         residual,
         data=data,
@@ -275,8 +292,15 @@ def encode_zlib_residual(
 
     q=16 的残差大部分是 128，zlib 通常比 PXC tile 快 10 倍以上，
     体积只大 20–40%。JPEG 差分优先用它；像素无损残差仍走 PXC。
+
+    只支持 8-bit：``decode_zlib_residual`` 按 uint8 解码，16-bit 残差用这个
+    编码器会写出"能创建、解不开"的归档。这里直接拒绝，让调用方回退 PXC。
     """
     residual = make_residual(ref, current)
+    if residual.data.dtype != np.dtype(np.uint8):
+        raise PxcsImageError(
+            t("codec.zlib_dtype", dtype=str(residual.data.dtype))
+        )
     if quant > 0:
         residual = quantize_residual(residual, quant)
     elif centered:
@@ -294,7 +318,10 @@ def encode_zlib_residual(
                     minimum=f"{float(min_zero_fraction):.3f}",
                 )
             )
-    payload = zlib.compress(residual.data.tobytes(), max(1, min(9, int(level))))
+    # memoryview 走缓冲协议，省掉 tobytes() 的整图副本。
+    payload = zlib.compress(
+        memoryview(residual.data), max(1, min(9, int(level)))
+    )
     approx_data = apply_residual(ref, residual, centered)
     approx = replace(
         current,
@@ -311,16 +338,33 @@ def decode_zlib_residual(
     entry: ArchiveEntry,
     ref: ImageData,
 ) -> ImageData:
-    raw = zlib.decompress(payload)
-    channels = ref.channels
-    expected = entry.width * entry.height * channels
-    if len(raw) != expected:
+    """解 zlib 残差。
+
+    残差数组的 dtype 固定为 uint8（``encode_zlib_residual`` 只接受 8-bit），
+    所以这里先用参考图的通道数算出精确长度，再交给有界解压——旧实现在
+    长度校验之前就 ``zlib.decompress`` 了整块数据，炸弹可以直接吃掉内存。
+    """
+    if ref is None:
+        raise PxcsImageError(t("codec.residual_without_ref"))
+    if ref.mode != entry.mode:
         raise PxcsImageError(
-            t("codec.zlib_length", expected=expected, actual=len(raw))
+            t("codec.mode_mismatch", ref=ref.mode, current=entry.mode)
         )
-    data = np.frombuffer(raw, dtype=np.uint8).copy().reshape(
-        entry.height, entry.width, channels
+    if entry.width <= 0 or entry.height <= 0:
+        raise PxcsImageError(
+            t("codec.zlib_length", expected=0, actual=0)
+        )
+    channels = ref.channels
+    shape = (entry.height, entry.width, channels)
+    if ref.data.shape != shape:
+        raise PxcsImageError(t("codec.shape_mismatch"))
+    expected = entry.width * entry.height * channels
+    raw = decompress_bounded(
+        payload, limit=expected, expected=expected, label=entry.path
     )
+    # 不解码时不需要写权限：分块压缩的输出本来就是只读的，
+    # 省掉一份整图复制（大图残差能省几十 MB）。
+    data = np.frombuffer(raw, dtype=np.uint8).reshape(shape)
     residual = ImageData(
         mode=entry.mode,
         width=entry.width,

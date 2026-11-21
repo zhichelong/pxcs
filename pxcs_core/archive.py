@@ -1,13 +1,17 @@
-"""PXCS 归档的创建、列出、提取与校验。"""
+﻿"""PXCS 归档的创建、列出、提取与校验。"""
 from __future__ import annotations
 
 import concurrent.futures as cf
 import fnmatch
+import hashlib
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import zlib
+from collections import defaultdict
 
 import numpy as np
 from collections import OrderedDict, defaultdict
@@ -77,8 +81,11 @@ from .format import (
     DEFAULT_KEYFRAME_INTERVAL,
     DEFAULT_TILE_SIZE,
     DEFAULT_ZLIB_LEVEL,
+    MAX_DEPTH,
 )
 from .progress import ProgressDisplay
+from .webpinfo import is_lossless_webp
+from .zlibsafe import decompress_bounded
 from .paths import (
     PxcsPathError,
     SourceFile,
@@ -175,9 +182,14 @@ class CreateOptions:
     group_regex: str = r"\d+_p"
     # regex 一个都不命中时：resolution=回退分辨率分组（推荐）；singleton=逐张 key；error=报错。
     group_regex_fallback: str = "resolution"
-    # 有损残差量化步长；0=像素无损。只用于 JPEG/WebP 组。
+    # 有损残差量化步长；0=像素无损。只用于 JPEG/有损 WebP 组。
     delta_quant: int = 12
     delta_quant_max: int = 16
+    # 显式量化档位（--quant-list）；非空时覆盖 delta_quant/delta_quant_max。
+    quant_list: tuple[int, ...] = ()
+    # 是否为每个有损条目计算 max|diff|/PSNR。默认关闭：整图逐像素比较
+    # 在 4K 图上要 0.5s 以上，会让默认创建慢 30% 以上。
+    report_quality: bool = False
     # 量化残差中 128（零差分）比例低于该值时，直接回退 raw，避免 zlib 处理高熵数据。
     residual_min_zero_fraction: float = 0.40
     # auto=量化残差用 zlib（快），无损残差用 PXC；zlib/pxc 可强制。
@@ -230,7 +242,14 @@ class CreateStats:
     groups: int = 0
     keys: int = 0
     lossy_deltas: int = 0
+    max_pixel_error: int = 0
+    psnr_sum: float = 0.0
+    quality_reported: int = 0
+    max_depth: int = 0
+    mean_depth: float = 0.0
     volumes: int = 0
+    # 进程峰值常驻内存（真实 RSS，不是内部 lease 计数）。
+    peak_rss_bytes: int = 0
     # 读不到/写不进而被跳过的文件数；>0 时 create 的退出码是 3。
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
@@ -296,12 +315,18 @@ def _probe_image(path: Path) -> Optional[ImageProbe]:
                 fmt = "JPEG"
             if fmt == "TIF":
                 fmt = "TIFF"
+            lossy = fmt in _RAW_IMAGE_FORMATS
+            if fmt == "WEBP":
+                # WebP 既可能是无损也可能是有损：按 RIFF 块判断，不能只看扩展名。
+                lossless = is_lossless_webp(path)
+                if lossless is not None:
+                    lossy = not lossless
             return ImageProbe(
                 format=fmt,
                 width=int(img.width),
                 height=int(img.height),
                 mode=str(img.mode),
-                lossy=fmt in _RAW_IMAGE_FORMATS,
+                lossy=lossy,
             )
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return None
@@ -398,6 +423,7 @@ class ExtractStats:
     skipped: int = 0
     failed: int = 0
     bytes: int = 0
+    peak_rss_bytes: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -405,6 +431,7 @@ class ExtractStats:
 class VerifyStats:
     checked: int = 0
     failed: int = 0
+    peak_rss_bytes: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -591,124 +618,174 @@ def _atomic_save_image(
 class _ImageResolver:
     """按需解码图片，并缓存少量最近图像供差分链使用。"""
 
-    def __init__(self, reader: ArchiveReader, cache_size: int = 4) -> None:
+    def __init__(
+        self,
+        reader: ArchiveReader,
+        cache_size: int = 4,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> None:
         self.reader = reader
         self.cache: OrderedDict[int, ImageData] = OrderedDict()
         self.cache_size = max(1, cache_size)
+        # 缓存同时受"张数"和"字节数"限制：8K RGBA 一张就 130 MB，
+        # 只按张数算会让每个 worker 悄悄吃掉几百 MB。
+        self.max_bytes = max(1, int(max_bytes))
+        self._cached_bytes = 0
         self.visiting: set[int] = set()
 
     def _remember(self, entry_id: int, image: ImageData) -> ImageData:
+        size = int(image.data.nbytes)
+        previous = self.cache.pop(entry_id, None)
+        if previous is not None:
+            self._cached_bytes -= int(previous.data.nbytes)
         self.cache[entry_id] = image
         self.cache.move_to_end(entry_id)
-        while len(self.cache) > self.cache_size:
-            self.cache.popitem(last=False)
+        self._cached_bytes += size
+        while self.cache and (
+            len(self.cache) > self.cache_size
+            or (self._cached_bytes > self.max_bytes and len(self.cache) > 1)
+        ):
+            _old_id, evicted = self.cache.popitem(last=False)
+            self._cached_bytes -= int(evicted.data.nbytes)
         return image
 
     def get(self, entry_id: int) -> ImageData:
-        if entry_id in self.cache:
+        """按引用链顺序迭代解码；链再长也不会触发 Python 递归上限。
+
+        旧实现是 ``self.get(entry.ref)`` 递归：容器只校验 ``ref < id`` 和
+        ``1 <= depth <= 255``，不校验 ``depth == 父.depth + 1``，伪造 depth 的
+        归档能构造上千层的真实链，直接把 RecursionError 抛到 CLI 之外。
+        这里先把缺失的祖先一次性收集齐，再从最底层往上解码。
+        """
+        cached = self.cache.get(entry_id)
+        if cached is not None:
             self.cache.move_to_end(entry_id)
-            return self.cache[entry_id]
-        if entry_id in self.visiting:
-            raise PxcsFormatError(t("archive.delta_cycle"))
-        entry = self.reader.get_entry(entry_id)
-        if entry.kind != "image":
-            raise PxcsFormatError(t("archive.not_image", path=entry.path))
-        self.visiting.add(entry_id)
+            return cached
+
+        missing: list[int] = []
+        cur = entry_id
+        while cur not in self.cache:
+            if cur in self.visiting:
+                raise PxcsFormatError(t("archive.delta_cycle"))
+            entry = self.reader.get_entry(cur)
+            if entry.kind != "image":
+                raise PxcsFormatError(t("archive.not_image", path=entry.path))
+            missing.append(cur)
+            if entry.ref is None:
+                break
+            if len(missing) > MAX_DEPTH + 1:
+                # 容器层已经按真实链长拒绝过；这里只防御绕过加载校验的调用方。
+                raise PxcsFormatError(t("archive.chain_too_long", path=entry.path))
+            cur = entry.ref
+
+        self.visiting.update(missing)
         try:
-            if entry.codec == CODEC_PXC:
-                image = decode_keyframe(self.reader.read_entry_data(entry))
-                if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
-                    raise PxcsFormatError(t("archive.keyframe_pixel_hash", path=entry.path))
-            elif entry.codec == CODEC_WEBP_LOSSLESS:
-                payload = self.reader.read_entry_data(entry)
-                if len(payload) != entry.stored_length:
-                    raise PxcsFormatError(t("archive.webp_key_length", path=entry.path))
-                image = load_image_bytes(
-                    payload,
-                    Path(entry.path).name,
-                    source_file_size=entry.size,
-                    source_format=entry.format or "WEBP",
-                )
-                # WebP 会把“全透明/全不透明”的 alpha 平面省略。
-                # 关键帧条目记录了 constant_alpha，解码后补回完整通道。
-                if (
-                    entry.constant_alpha is not None
-                    and entry.mode == "RGBA"
-                    and image.mode == "RGB"
-                ):
-                    alpha = np.full(
-                        (image.height, image.width, 1),
-                        int(entry.constant_alpha),
-                        dtype=image.data.dtype,
-                    )
-                    data = np.ascontiguousarray(
-                        np.concatenate([image.data, alpha], axis=2)
-                    )
-                    image = replace(
-                        image,
-                        mode="RGBA",
-                        data=data,
-                        constant_alpha=int(entry.constant_alpha),
-                        pixel_hash=canonical_pixel_hash(
-                            "RGBA", image.width, image.height, data
-                        ),
-                    )
-                if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
-                    raise PxcsFormatError(t("archive.webp_key_hash", path=entry.path))
-            elif entry.codec == CODEC_PXC_RESIDUAL:
-                if entry.ref is None:
-                    raise PxcsFormatError(t("archive.residual_need_ref"))
-                ref = self.get(entry.ref)
-                residual = decode_keyframe(self.reader.read_entry_data(entry))
-                image = reconstruct_image(ref, residual, entry)
-            elif entry.codec == CODEC_ZLIB_RESIDUAL:
-                if entry.ref is None:
-                    raise PxcsFormatError(t("archive.zlib_residual_need_ref"))
-                ref = self.get(entry.ref)
-                payload = self.reader.read_entry_data(entry)
-                image = decode_zlib_residual(payload, entry, ref)
-            elif entry.codec in {CODEC_RAW, CODEC_JPEGXL}:
-                payload = self.reader.read_entry_data(entry)
-                if entry.codec == CODEC_JPEGXL:
-                    payload = _unpack_jpeg(entry, payload)
-                if len(payload) != entry.size:
-                    raise PxcsFormatError(t("archive.raw_image_length", path=entry.path))
-                if entry.source_sha256 and sha256_bytes(payload).hex() != entry.source_sha256:
-                    raise PxcsFormatError(t("archive.raw_image_sha", path=entry.path))
-                image = load_raw_image(payload, entry)
-                if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
-                    raise PxcsFormatError(t("archive.raw_image_pixel_hash", path=entry.path))
-            elif entry.codec == CODEC_DUP:
-                if entry.ref is None:
-                    raise PxcsFormatError(t("archive.dup_image_need_ref"))
-                image = self.get(entry.ref)
-            else:
-                raise PxcsFormatError(t("archive.unknown_image_codec", codec=entry.codec))
-            return self._remember(entry_id, image)
+            # reversed：先解最底层（无 ref 或 ref 已缓存），子节点随后直接命中缓存。
+            for eid in reversed(missing):
+                image = self._decode(self.reader.get_entry(eid))
+                self._remember(eid, image)
         finally:
-            self.visiting.discard(entry_id)
+            self.visiting.difference_update(missing)
+        return self.cache[entry_id]
+
+    def _decode(self, entry: ArchiveEntry) -> ImageData:
+        """解码单个条目；引用链上的父节点必须已经在缓存里。"""
+        if entry.codec == CODEC_PXC:
+            image = decode_keyframe(self.reader.read_entry_data(entry))
+            if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
+                raise PxcsFormatError(t("archive.keyframe_pixel_hash", path=entry.path))
+        elif entry.codec == CODEC_WEBP_LOSSLESS:
+            payload = self.reader.read_entry_data(entry)
+            if len(payload) != entry.stored_length:
+                raise PxcsFormatError(t("archive.webp_key_length", path=entry.path))
+            image = load_image_bytes(
+                payload,
+                Path(entry.path).name,
+                source_file_size=entry.size,
+                source_format=entry.format or "WEBP",
+            )
+            # WebP 会把“全透明/全不透明”的 alpha 平面省略。
+            # 关键帧条目记录了 constant_alpha，解码后补回完整通道。
+            if (
+                entry.constant_alpha is not None
+                and entry.mode == "RGBA"
+                and image.mode == "RGB"
+            ):
+                alpha = np.full(
+                    (image.height, image.width, 1),
+                    int(entry.constant_alpha),
+                    dtype=image.data.dtype,
+                )
+                data = np.ascontiguousarray(
+                    np.concatenate([image.data, alpha], axis=2)
+                )
+                image = replace(
+                    image,
+                    mode="RGBA",
+                    data=data,
+                    constant_alpha=int(entry.constant_alpha),
+                    pixel_hash=canonical_pixel_hash(
+                        "RGBA", image.width, image.height, data
+                    ),
+                )
+            if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
+                raise PxcsFormatError(t("archive.webp_key_hash", path=entry.path))
+        elif entry.codec == CODEC_PXC_RESIDUAL:
+            if entry.ref is None:
+                raise PxcsFormatError(t("archive.residual_need_ref"))
+            residual = decode_keyframe(self.reader.read_entry_data(entry))
+            image = reconstruct_image(self._ref_image(entry), residual, entry)
+        elif entry.codec == CODEC_ZLIB_RESIDUAL:
+            if entry.ref is None:
+                raise PxcsFormatError(t("archive.zlib_residual_need_ref"))
+            payload = self.reader.read_entry_data(entry)
+            image = decode_zlib_residual(payload, entry, self._ref_image(entry))
+        elif entry.codec in {CODEC_RAW, CODEC_JPEGXL}:
+            payload = self.reader.read_entry_data(entry)
+            if entry.codec == CODEC_JPEGXL:
+                payload = _unpack_jpeg(entry, payload)
+            if len(payload) != entry.size:
+                raise PxcsFormatError(t("archive.raw_image_length", path=entry.path))
+            if entry.source_sha256 and sha256_bytes(payload).hex() != entry.source_sha256:
+                raise PxcsFormatError(t("archive.raw_image_sha", path=entry.path))
+            image = load_raw_image(payload, entry)
+            if entry.pixel_sha256 and image.pixel_hash.hex() != entry.pixel_sha256:
+                raise PxcsFormatError(t("archive.raw_image_pixel_hash", path=entry.path))
+        elif entry.codec == CODEC_DUP:
+            if entry.ref is None:
+                raise PxcsFormatError(t("archive.dup_image_need_ref"))
+            image = self._ref_image(entry)
+        else:
+            raise PxcsFormatError(t("archive.unknown_image_codec", codec=entry.codec))
+        return image
+
+    def _ref_image(self, entry: ArchiveEntry) -> ImageData:
+        ref = self.cache.get(int(entry.ref))  # type: ignore[arg-type]
+        if ref is None:
+            # 正常路径不会发生：get() 会先按依赖顺序补齐祖先。
+            raise PxcsFormatError(t("archive.ref_not_ready", path=entry.path))
+        return ref
 
 
 def _original_bytes(reader: ArchiveReader, entry: ArchiveEntry) -> bytes:
-    """取回文件原始字节；DUP 递归解析。"""
-    if entry.codec == CODEC_DUP:
+    """取回文件原始字节；DUP 链用循环解析，避免长链触发递归上限。"""
+    hops = 0
+    while entry.codec == CODEC_DUP:
         if entry.ref is None:
             raise PxcsFormatError(t("archive.dup_need_ref"))
-        return _original_bytes(reader, reader.get_entry(entry.ref))
+        hops += 1
+        if hops > MAX_DEPTH:
+            raise PxcsFormatError(t("archive.chain_too_long", path=entry.path))
+        entry = reader.get_entry(entry.ref)
     payload = reader.read_entry_data(entry)
     if entry.codec == CODEC_JPEGXL:
         return _unpack_jpeg(entry, payload)
     if entry.codec == CODEC_STORE:
         return payload
     if entry.codec == CODEC_ZLIB:
-        try:
-            raw = zlib.decompress(payload)
-        except zlib.error as exc:
-            raise PxcsFormatError(
-                t("archive.zlib_failed", path=entry.path, reason=exc)
-            ) from exc
-        if len(raw) != entry.size:
-            raise PxcsFormatError(t("archive.unzip_length", path=entry.path))
+        raw = decompress_bounded(
+            payload, limit=entry.size, expected=entry.size, label=entry.path
+        )
         if crc32(raw) != entry.raw_crc32:
             raise PxcsFormatError(t("archive.raw_crc", path=entry.path))
         if entry.source_sha256 and sha256_bytes(raw).hex() != entry.source_sha256:
@@ -732,15 +809,19 @@ def _unpack_jpeg(entry: ArchiveEntry, blob: bytes) -> bytes:
 
 
 def _raw_payload_for_image(reader: ArchiveReader, entry: ArchiveEntry) -> bytes:
+    hops = 0
+    while entry.codec == CODEC_DUP:
+        if entry.ref is None:
+            raise PxcsFormatError(t("archive.dup_need_ref"))
+        hops += 1
+        if hops > MAX_DEPTH:
+            raise PxcsFormatError(t("archive.chain_too_long", path=entry.path))
+        entry = reader.get_entry(entry.ref)
     if entry.codec in {CODEC_RAW, CODEC_JPEGXL}:
         payload = reader.read_entry_data(entry)
         if entry.codec == CODEC_JPEGXL:
             return _unpack_jpeg(entry, payload)
         return payload
-    if entry.codec == CODEC_DUP:
-        if entry.ref is None:
-            raise PxcsFormatError(t("archive.dup_need_ref"))
-        return _raw_payload_for_image(reader, reader.get_entry(entry.ref))
     raise PxcsFormatError(
             t("archive.not_raw_image", path=entry.path, codec=entry.codec)
         )
@@ -844,6 +925,12 @@ def create_archive(
         raise PxcsFormatError(t("archive.option_delta_quant"))
     if not (0 <= opts.delta_quant_max <= 255):
         raise PxcsFormatError(t("archive.option_delta_quant_max"))
+    if opts.quant_list:
+        if len(opts.quant_list) > 8:
+            raise PxcsFormatError(t("archive.option_quant_list"))
+        for value in opts.quant_list:
+            if not (0 <= int(value) <= 255):
+                raise PxcsFormatError(t("archive.option_quant_list"))
     if opts.residual_codec not in {"auto", "zlib", "pxc"}:
         raise PxcsFormatError(t("archive.option_residual_codec"))
     if not (0.0 <= opts.residual_min_zero_fraction <= 1.0):
@@ -1591,21 +1678,108 @@ def _print_progress(done: int, total: int) -> None:
         print(line)
 
 
+def _planned_target(entry: ArchiveEntry, output_dir: Path, lossless: bool) -> Path:
+    """一个条目最终会写到哪个路径；提取前后的路径计算只能走这里。"""
+    target = safe_join(output_dir, entry.path)
+    if entry.kind == "image" and lossless:
+        fmt = "TIFF" if entry.mode in {"CMYK", "I", "F"} else "PNG"
+        target = target.with_suffix(".tif" if fmt == "TIFF" else ".png")
+    return target
+
+
+def plan_extraction(
+    entries: list[ArchiveEntry],
+    output_dir: Path,
+    *,
+    lossless: bool,
+    on_conflict: str = "error",
+) -> tuple[dict[int, Path], list[ArchiveEntry]]:
+    """预先算出所有输出路径，返回 (entry_id -> target, 需要跳过的条目)。
+
+    同一个归档里两条不同路径的条目，转成输出格式后可能落到同一个文件
+    （例如 ``a.jpg`` 和 ``a.png`` 在 ``--lossless`` 下都写 ``a.png``）。
+    旧实现各写各的，后一条被 ``target.exists()`` 静默跳过，用户只看到
+    "skipped"，不知道少了一张。这里在动盘之前就发现冲突。
+
+    ``on_conflict``：
+    - ``error``：抛 ``PxcsFormatError``，消息里给出两个条目路径；
+    - ``skip``：保留第一条，后续同名条目跳过；
+    - ``rename``：加 `` (2)``、`` (3)`` 后缀。
+    """
+    if on_conflict not in {"error", "skip", "rename"}:
+        raise PxcsFormatError(
+            t("extract.on_conflict_invalid", value=str(on_conflict))
+        )
+    output_key = os.path.normcase(os.path.abspath(str(output_dir)))
+    used: dict[str, ArchiveEntry] = {}
+    targets: dict[int, Path] = {}
+    skipped: list[ArchiveEntry] = []
+
+    def key_of(path: Path) -> str:
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    for entry in entries:
+        target = _planned_target(entry, output_dir, lossless)
+        key = key_of(target)
+        if key == output_key or key.startswith(output_key + os.sep) is False:
+            raise PxcsFormatError(t("paths.escape", value=repr(entry.path)))
+        first = used.get(key)
+        if first is not None:
+            if on_conflict == "error":
+                raise PxcsFormatError(
+                    t(
+                        "extract.target_conflict",
+                        first=first.path,
+                        second=entry.path,
+                        target=str(target),
+                    )
+                )
+            if on_conflict == "skip":
+                skipped.append(entry)
+                continue
+            # rename：找第一个没被占用的 "name (N).ext"
+            number = 2
+            while True:
+                candidate = target.with_name(
+                    f"{target.stem} ({number}){target.suffix}"
+                )
+                candidate_key = key_of(candidate)
+                if candidate_key not in used:
+                    target = candidate
+                    key = candidate_key
+                    break
+                number += 1
+        used[key] = entry
+        targets[entry.id] = target
+
+    # 文件/目录前缀冲突：某条目的输出文件恰好是另一条的父目录。
+    file_keys = set(used)
+    for key, entry in used.items():
+        parent = os.path.dirname(key)
+        while parent and len(parent) > len(output_key):
+            if parent in file_keys:
+                raise PxcsFormatError(
+                    t(
+                        "extract.target_prefix",
+                        first=used[parent].path,
+                        second=entry.path,
+                    )
+                )
+            parent = os.path.dirname(parent)
+    return targets, skipped
+
+
 def _extract_one(
     reader: ArchiveReader,
     resolver: "_ImageResolver",
     entry: ArchiveEntry,
-    output_dir: Path,
+    target: Path,
     overwrite: bool,
     quality: Optional[int],
     lossless: bool,
 ) -> bool:
     """提取单个条目，返回是否真的写了盘（False = 目标已存在被跳过）。"""
-    target = safe_join(output_dir, entry.path)
     if entry.kind == "image":
-        if lossless:
-            fmt = "TIFF" if entry.mode in {"CMYK", "I", "F"} else "PNG"
-            target = target.with_suffix(".tif" if fmt == "TIFF" else ".png")
         return _extract_image(
             reader, resolver, entry, target, overwrite, quality, lossless=lossless
         )
@@ -1615,8 +1789,8 @@ def _extract_one(
 def _extract_range(
     archive: Path,
     password: Optional[str],
-    output_dir: Path,
     entry_ids: list[int],
+    targets: dict[int, Path],
     overwrite: bool,
     quality: Optional[int],
     lossless: bool,
@@ -1631,7 +1805,13 @@ def _extract_range(
             entry = reader.get_entry(entry_id)
             try:
                 if _extract_one(
-                    reader, resolver, entry, output_dir, overwrite, quality, lossless
+                    reader,
+                    resolver,
+                    entry,
+                    targets[entry_id],
+                    overwrite,
+                    quality,
+                    lossless,
                 ):
                     extracted += 1
                     total_bytes += entry.size
@@ -1659,6 +1839,7 @@ def extract_archive(
     quiet: bool = False,
     password: Optional[str] = None,
     threads: int = 0,
+    on_conflict: str = "error",
 ) -> ExtractStats:
     from .limits import resolve_threads
 
@@ -1668,6 +1849,19 @@ def extract_archive(
     with ArchiveReader(archive, password=password) as reader:
         selected = [e for e in reader.entries if _match_names(e.path, names)]
         encrypted = reader.is_encrypted
+    if not selected:
+        raise PxcsFormatError(t("extract.no_match"))
+    # 输出路径在动盘之前全部算好：后缀转换/文件目录前缀冲突都在这里暴露。
+    targets, conflict_skipped = plan_extraction(
+        selected, output_dir, lossless=lossless, on_conflict=on_conflict
+    )
+    if conflict_skipped:
+        skipped_ids = {e.id for e in conflict_skipped}
+        stats.skipped += len(conflict_skipped)
+        selected = [e for e in selected if e.id not in skipped_ids]
+        if not quiet:
+            for entry in conflict_skipped:
+                print(t("extract.skip_conflict", path=entry.path))
     if not selected:
         raise PxcsFormatError(t("extract.no_match"))
     if not quiet:
@@ -1703,8 +1897,8 @@ def extract_archive(
                     _extract_range,
                     archive,
                     password,
-                    output_dir,
                     ids,
+                    targets,
                     overwrite,
                     quality,
                     lossless,
@@ -1735,7 +1929,7 @@ def extract_archive(
                         reader,
                         resolver,
                         entry,
-                        output_dir,
+                        targets[entry.id],
                         overwrite,
                         quality,
                         lossless,
@@ -1768,22 +1962,37 @@ def extract_archive(
                 size=human_size(stats.bytes),
             )
         )
+    from .limits import peak_rss_bytes
+
+    stats.peak_rss_bytes = peak_rss_bytes()
     return stats
+
+
+VERIFY_LEVELS = ("metadata", "quick", "full", "source")
 
 
 def _verify_entry(
     reader: ArchiveReader,
     resolver: "_ImageResolver",
     entry: ArchiveEntry,
-    quick: bool,
+    level: str,
 ) -> None:
-    """校验单个条目；失败时抛异常，由调用方记账。"""
+    """按等级校验单个条目；失败时抛异常，由调用方记账。
+
+    - metadata：只依赖加载时的结构校验，不读 payload；
+    - quick：读 payload 校验 CRC/SHA，**不做任何图片重建**；
+    - full：完整解码 + 像素哈希（默认）；
+    - source：full 加上"源文件字节可还原"的校验（raw/jpegxl/store/zlib）。
+    """
+    if level == "metadata":
+        return
+    if level == "quick":
+        # 旧实现里 quick 对残差条目仍会 resolver.get() 整链重建，
+        # 与 help 文案"不做完整图片解码"矛盾，这里彻底切断。
+        reader.read_entry_data(entry)
+        return
     if entry.kind == "image":
-        if quick and entry.codec not in {
-            CODEC_DUP, CODEC_PXC_RESIDUAL, CODEC_ZLIB_RESIDUAL
-        }:
-            reader.read_entry_data(entry)
-        elif not quick and not entry.pixel_sha256:
+        if not entry.pixel_sha256:
             # 没有像素哈希（例如 raw 直通且创建时跳过了解码）：
             # 只验 payload 完整性。payload 就是源文件字节，字节级
             # SHA-256 已完整覆盖等价性，再解码一遍没有额外信息。
@@ -1799,16 +2008,13 @@ def _verify_entry(
             ):
                 raise PxcsFormatError(t("verify.raw_sha_mismatch"))
     else:
-        if quick:
-            reader.read_entry_data(entry)
-        else:
-            _original_bytes(reader, entry)
+        _original_bytes(reader, entry)
 
 
 def _verify_range(
     archive: Path,
     password: Optional[str],
-    quick: bool,
+    level: str,
     start: int,
     stop: int,
 ) -> tuple[int, list[str]]:
@@ -1823,7 +2029,7 @@ def _verify_range(
         resolver = _ImageResolver(reader)
         for entry in reader.entries[start:stop]:
             try:
-                _verify_entry(reader, resolver, entry, quick)
+                _verify_entry(reader, resolver, entry, level)
                 checked += 1
             except (PxcError, OSError, ValueError) as exc:
                 errors.append(f"{entry.path}: {exc}")
@@ -1838,10 +2044,16 @@ def verify_archive(
     archive: Path,
     *,
     quick: bool = False,
+    level: Optional[str] = None,
     password: Optional[str] = None,
     threads: int = 0,
 ) -> VerifyStats:
     from .limits import resolve_threads
+
+    if level is None:
+        level = "quick" if quick else "full"
+    if level not in VERIFY_LEVELS:
+        raise PxcsFormatError(t("verify.level_unknown", level=str(level)))
 
     workers = resolve_threads(threads)
     stats = VerifyStats()
@@ -1861,7 +2073,7 @@ def verify_archive(
             results = list(
                 pool.map(
                     lambda rng: _verify_range(
-                        archive, password, quick, rng[0], rng[1]
+                        archive, password, level, rng[0], rng[1]
                     ),
                     ranges,
                 )
@@ -1875,7 +2087,7 @@ def verify_archive(
             resolver = _ImageResolver(reader)
             for entry in reader.entries:
                 try:
-                    _verify_entry(reader, resolver, entry, quick)
+                    _verify_entry(reader, resolver, entry, level)
                     stats.checked += 1
                 except (PxcError, OSError, ValueError) as exc:
                     stats.failed += 1
@@ -1884,6 +2096,7 @@ def verify_archive(
     for message in stats.errors:
         print(f"[FAIL] {message}")
     extra = t("verify.lossy_note", count=lossy) if lossy else ""
+    extra += t("verify.level_suffix", level=level)
     print(
         t(
             "verify.summary",
@@ -1893,6 +2106,191 @@ def verify_archive(
             extra=extra,
         )
     )
+    from .limits import peak_rss_bytes
+
+    stats.peak_rss_bytes = peak_rss_bytes()
+    return stats
+
+
+@dataclass
+class EstimateStats:
+    """创建前估算的结果；所有数字都来自"扫描 + 抽样实际编码"。"""
+
+    files: int = 0
+    images: int = 0
+    others: int = 0
+    groups: int = 0
+    duplicates: int = 0
+    duplicate_bytes: int = 0
+    original_bytes: int = 0
+    estimated_bytes: int = 0
+    estimated_low: int = 0
+    estimated_high: int = 0
+    sampled_files: int = 0
+    sampled_bytes: int = 0
+    threads: int = 0
+    memory_bytes: int = 0
+    encryption_ignored: bool = False
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _count_duplicate_files(sources: list[SourceFile]) -> tuple[int, int]:
+    """按 (大小, SHA-256) 精确统计重复；只对同尺寸文件算哈希。"""
+    by_size: dict[int, list[SourceFile]] = defaultdict(list)
+    for source in sources:
+        try:
+            by_size[source.path.stat().st_size].append(source)
+        except OSError:
+            continue
+    seen: set[str] = set()
+    count = 0
+    saved = 0
+    for size, group in by_size.items():
+        if len(group) < 2:
+            continue
+        for source in group:
+            try:
+                digest = _file_sha256(source.path)
+            except OSError:
+                continue
+            if digest in seen:
+                count += 1
+                saved += size
+            else:
+                seen.add(digest)
+    return count, saved
+
+
+def _percentile(values: list[float], q: float) -> float:
+    if not values:
+        return 1.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))
+    return float(ordered[index])
+
+
+def estimate_archive(
+    output: Path,
+    inputs: Iterable[str],
+    options: Optional["CreateOptions"] = None,
+    *,
+    sample_bytes: int = 256 * 1024 * 1024,
+    sample_files: int = 800,
+) -> EstimateStats:
+    """创建前分析：数量/分组/重复 + 抽样实际编码后的体积区间。
+
+    抽样按"整组"取（优先大组），把样本硬链接进临时目录后真的跑一遍
+    ``create_archive``，再用逐文件 ratio 的 p10/p50/p90 外推。不做任何
+    写死的压缩率猜测；样本太小时区间会很宽，这是有意暴露的不确定性。
+    """
+    from .limits import resolve_memory_budget, resolve_threads
+
+    opts = options or CreateOptions()
+    input_paths = list(inputs)
+    sources = collect_source_files(
+        input_paths, recursive=opts.recursive, exclude=output
+    )
+    sources = [
+        item for item in sources
+        if not _is_archive_artifact(item.path.name, output.name)
+        and not _is_pxcs_artifact(item.path.name)
+    ]
+    if not sources:
+        raise PxcsFormatError(t("paths.no_files"))
+    items = _order_work_items(
+        sources,
+        group_mode=opts.group_mode,
+        group_regex=opts.group_regex,
+        group_regex_fallback=opts.group_regex_fallback,
+    )
+    stats = EstimateStats(
+        files=len(items),
+        images=sum(1 for i in items if i.probe is not None),
+        threads=resolve_threads(opts.threads),
+        memory_bytes=resolve_memory_budget(opts.memory_limit_mb),
+        encryption_ignored=bool(opts.password),
+    )
+    stats.others = stats.files - stats.images
+    stats.original_bytes = sum(i.source.path.stat().st_size for i in items)
+    groups: dict[tuple, list[WorkItem]] = defaultdict(list)
+    for item in items:
+        groups[item.group_key].append(item)
+    stats.groups = len({k for k, v in groups.items() if v[0].probe is not None})
+    stats.duplicates, stats.duplicate_bytes = _count_duplicate_files(sources)
+
+    # 抽样：整组取，优先字节数大的组，控制总量。
+    budget = min(int(sample_bytes), max(1, stats.original_bytes))
+    chosen: list[WorkItem] = []
+    sampled = 0
+    for _key, members in sorted(
+        groups.items(),
+        key=lambda kv: -sum(m.source.path.stat().st_size for m in kv[1]),
+    ):
+        chosen.extend(members)
+        sampled += sum(m.source.path.stat().st_size for m in members)
+        if sampled >= budget or len(chosen) >= sample_files:
+            break
+    stats.sampled_files = len(chosen)
+    stats.sampled_bytes = sampled
+
+    ratios: list[float] = []
+    # 放在系统临时目录：dry-run 不应该顺手创建输出目录。硬链接失败时
+    # （跨卷）退回复制，样本上限由 sample_bytes 控制。
+    tmp_root = Path(tempfile.mkdtemp(prefix="pxcs-est-"))
+    try:
+        sample_dir = tmp_root / "sample"
+        sample_dir.mkdir()
+        name_to_size: dict[str, int] = {}
+        for index, item in enumerate(chosen):
+            source = item.source.path
+            size = source.stat().st_size
+            target = sample_dir / f"e{index:05d}{source.suffix.lower()}"
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copyfile(source, target)
+            name_to_size[target.name] = size
+        sample_opts = replace(
+            opts,
+            quiet=True,
+            progress=False,
+            details=False,
+            verbose=False,
+            show_groups=False,
+            self_check=False,
+            volume_size=None,
+            password=None,
+            overwrite=True,
+        )
+        sample_archive = tmp_root / "sample.pxcs"
+        try:
+            create_archive(sample_archive, [str(sample_dir)], sample_opts)
+            with ArchiveReader(sample_archive) as reader:
+                for entry in reader.entries:
+                    original = name_to_size.get(Path(entry.path).name)
+                    if original:
+                        ratios.append(entry.stored_length / original)
+        except (PxcError, OSError):
+            ratios = []
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    low = _percentile(ratios, 0.10)
+    mid = _percentile(ratios, 0.50)
+    high = _percentile(ratios, 0.90)
+    stats.estimated_bytes = int(stats.original_bytes * mid)
+    stats.estimated_low = int(stats.original_bytes * low)
+    stats.estimated_high = int(stats.original_bytes * high)
     return stats
 
 

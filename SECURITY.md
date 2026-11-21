@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the current minor (1.4) is supported. Format minors 0–4 can be *read*; only the
+Only the current minor (1.5) is supported. Format minors 0–4 can be *read*; only the
 newest writer is maintained.
 
 ## Reporting a vulnerability
@@ -52,3 +52,22 @@ Protected against:
 - Archives are verified with `pxcs.py verify` after writing; an interrupted create writes
   nothing usable rather than a partial archive.
 - Password files should live outside any directory you archive.
+
+
+## Reading untrusted archives
+
+Archives may come from untrusted sources. Three hard limits apply before any decoding or
+key derivation:
+
+- **Decompression bounds**: index, residual and plain-file payloads use bounded streaming
+  decompression; exceeding the declared length stops immediately, and stream end, trailing
+  bytes and the exact length are checked.
+- **Reference-chain bound**: the real chain depth is computed iteratively at load time and
+  must satisfy `depth == parent.depth + 1`, capped at 255. Image and DUP resolution are
+  iterative.
+- **KDF bound**: Argon2id above 512 MiB / 8 passes / 8 lanes (scrypt `log2N>18, r>8, p>4`)
+  is rejected by default, with the requested parameters in the error. Only opt in with
+  `--allow-expensive-kdf` after confirming the source. Unknown crypto-header flag bits are
+  rejected.
+
+`verify --level metadata` reads no payload at all and performs structural checks only.

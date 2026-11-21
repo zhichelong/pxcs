@@ -86,7 +86,15 @@
     "create_verbose_help": "逐个打印被跳过文件的原因（默认只在摘要里列前 20 项）",
     "no_self_check_help": "不做事后自检（默认写完会重开归档确认索引与条目数）",
     "memory_limit_help": "并发任务的内存预算，如 4G / 2048M；0=按可用物理内存自动（默认）",
-    "no_jxl_help": "不使用 JPEG XL 无损重打包（体积大 20%% 左右，但新归档能保持 1.2 兼容）"
+    "no_jxl_help": "不使用 JPEG XL 无损重打包（体积大 20%% 左右，但新归档能保持 1.2 兼容）",
+    "on_conflict_help": "输出路径冲突时：error=报错（默认），skip=保留第一条，rename=加序号",
+    "allow_expensive_kdf_help": "允许超出默认上限的 KDF 参数（派生密钥前会校验）",
+    "quant_list_help": "显式量化档位，逗号分隔（如 0,4,8,12,16,24）；只对有损 8-bit 源生效",
+    "quant_list_invalid": "量化档位列表无效: {value}（1–8 个 0–255 的整数）",
+    "verify_level_help": "校验等级：metadata=只看结构，quick=只验 payload CRC/SHA，full=完整解码（默认），source=额外校验源字节可还原",
+    "preset_help": "压缩预设：lossless=像素精确（不量化），balanced=默认，max=更小但更慢，custom=用各细项参数",
+    "dry_run_help": "只做扫描与抽样估算，不写归档",
+    "report_quality_help": "为有损条目计算并报告实际像素误差与 PSNR（会明显变慢）"
   },
   "create": {
     "summary": "[OK] {path} | {original} -> {archive} ({ratio}) | {groups} 组 / {keys} key | {images} 图 ({deltas} 差分, {lossy} 有损差分, {raw} 原始) | {files} 文件 | {dups} 重复 | {elapsed}s{extra}",
@@ -109,7 +117,19 @@
     "memory_stats": "[INFO] 内存预算峰值 {peak} / 上限 {budget}；因预算排队等待 {waits} 次",
     "skip_artifacts": "已跳过 {count} 个 .pxcs 文件/分卷（归档产物不再打包进新归档）",
     "similar_split": "[GROUP] {groups} 个分辨率组里混着不同内容，已按缩略图细分为多个子组",
-    "groups_incomplete": "内部错误：只处理了 {done}/{total} 个图片组，归档不完整（已中止）"
+    "groups_incomplete": "内部错误：只处理了 {done}/{total} 个图片组，归档不完整（已中止）",
+    "peak_rss": "内存峰值: {rss}",
+    "memory_small": "[WARN] 内存预算只有 {budget}，大图可能排队甚至单张超出预算",
+    "lossy_quality": "有损差分 {count} 条：最大像素误差 {max_error}，平均 PSNR {psnr} dB（归档内部近似像素）",
+    "preset_note": "[PRESET] {preset}：像素精确≠原始字节精确；JPEG 源要用 extract --lossless 导出 PNG 才能保住像素",
+    "depth_suffix": " | 引用深度 最大 {max} / 平均 {mean}",
+    "estimate_title": "[DRY-RUN] 创建前分析",
+    "estimate_files": "文件 {files}（图片 {images} / 其他 {others}），图片分组 {groups}",
+    "estimate_dups": "完全重复 {duplicates} 个，可省 {size}",
+    "estimate_size": "原始 {original} → 预计 {estimated}（抽样区间 {low} ~ {high}）",
+    "estimate_sample": "抽样 {files} 个文件（{size}），区间来自逐文件编码比 p10/p50/p90",
+    "estimate_advice": "建议线程 {threads}，内存预算 {memory}",
+    "estimate_encryption": "注意：估算忽略了加密开销（KDF 与 AEAD 头）"
   },
   "scan": {
     "start": "[SCAN] 正在读取 {count} 个图片头，统计分辨率..."
@@ -160,7 +180,10 @@
     "option_tile_size": "tile_size 必须在 8..1024",
     "option_keyframe_interval": "keyframe_interval 不能为负",
     "option_search_window": "search_window 不能为负",
-    "jxl_decode": "JPEG XL 还原失败: {path}: {reason}"
+    "jxl_decode": "JPEG XL 还原失败: {path}: {reason}",
+    "chain_too_long": "引用链超过上限: {path}",
+    "ref_not_ready": "内部错误：参考图尚未解码: {path}",
+    "option_quant_list": "quant_list 必须是 1–8 个 0–255 的整数"
   },
   "codec": {
     "mode_no_delta": "模式 {mode} 不支持差分",
@@ -170,7 +193,9 @@
     "zero_fraction": "残差零比例过低 ({zero} < {minimum})",
     "zlib_length": "zlib 残差长度错误: 期望 {expected}, 实际 {actual}",
     "shape_mismatch": "参考图与残差图形状不一致",
-    "restore_hash": "恢复像素哈希不匹配: {path}"
+    "restore_hash": "恢复像素哈希不匹配: {path}",
+    "residual_without_ref": "zlib 残差条目缺少参考图",
+    "zlib_dtype": "zlib 残差只支持 8-bit，当前 {dtype}"
   },
   "container": {
     "writer_closed": "writer 已关闭",
@@ -241,7 +266,12 @@
     "entry_missing": "条目不存在: {id}",
     "entry_data_short": "条目数据不完整: {path}",
     "entry_crc": "条目 CRC 校验失败: {path}",
-    "entry_sha": "条目 SHA-256 校验失败: {path}"
+    "entry_sha": "条目 SHA-256 校验失败: {path}",
+    "entry_chain": "引用链过长（条目 {id}，深度 {depth}）",
+    "entry_depth_link": "条目 {id} 的 depth 与父节点不一致: 期望 {expected}, 实际 {actual}",
+    "stream_encrypted": "加密归档不支持流式写入 payload",
+    "stream_short": "文件在写入过程中变短: {path}",
+    "stream_changed": "文件在扫描后发生变化: {path}"
   },
   "crypto": {
     "missing_library": "缺少 cryptography 依赖，无法处理加密归档（pip install cryptography）",
@@ -262,7 +292,9 @@
     "names_encrypted": "文件名已加密",
     "names_plain": "文件名未加密",
     "summary": "encryption: {kdf} + {aead} (m={p1}, t={p2}, p={p3}) | {names}",
-    "weak_password": "[WARN] 口令短于 8 个字符，强度偏低；建议使用更长的口令。"
+    "weak_password": "[WARN] 口令短于 8 个字符，强度偏低；建议使用更长的口令。",
+    "unknown_flags": "加密头 flags 含未知位: {value}",
+    "kdf_too_expensive": "归档要求的 KDF 开销超出默认上限：{kdf}(p1={p1}, p2={p2}, p3={p3})，上限 {limit}。确认来源可信后加 --allow-expensive-kdf 重试。"
   },
   "volume": {
     "none": "没有找到任何分卷",
@@ -313,13 +345,19 @@
     "quality_suffix": " | quality={quality}",
     "lossy_warning": "[WARN] {count} 个条目是有损差分；默认按 q95 重编码 JPEG，--lossless 输出的也是量化后的近似像素，不是源 JPEG 的原始像素。",
     "skip_existing": "[SKIP] 已存在: {path}",
-    "done": "[DONE] 提取 {extracted} | 跳过 {skipped} | 失败 {failed} | {size}"
+    "done": "[DONE] 提取 {extracted} | 跳过 {skipped} | 失败 {failed} | {size}",
+    "target_conflict": "两条条目会写到同一个文件: {first} 与 {second} -> {target}（用 --on-conflict 处理）",
+    "target_prefix": "输出路径冲突: {first} 是文件，但 {second} 需要把它当目录",
+    "on_conflict_invalid": "未知的冲突处理方式: {value}",
+    "skip_conflict": "[SKIP] 输出路径冲突，已跳过: {path}"
   },
   "verify": {
     "pixel_hash_mismatch": "像素哈希不匹配",
     "raw_sha_mismatch": "原始图片 SHA-256 不匹配",
     "lossy_note": " | 有损差分 {count}（仅校验归档内部近似像素）",
-    "summary": "[VERIFY] 检查 {checked}/{total} | 失败 {failed}{extra}"
+    "summary": "[VERIFY] 检查 {checked}/{total} | 失败 {failed}{extra}",
+    "level_suffix": " | 等级 {level}",
+    "level_unknown": "未知的校验等级: {level}"
   },
   "progress": {
     "title": "正在压缩 {title}",
@@ -339,7 +377,8 @@
     "detail_dup": "[DUP ] {path} -> #{ref}",
     "detail_raw": "[RAW ] {path} | {size}",
     "detail_raw_source": "[RAW ] {path} | {size} | 原始码流",
-    "detail_raw_fallback": "[RAW ] {path} | 像素 PXC 比源文件大，回退原始码流"
+    "detail_raw_fallback": "[RAW ] {path} | 像素 PXC 比源文件大，回退原始码流",
+    "eta": "预计剩余  {eta}"
   },
   "paths": {
     "empty": "空路径",
@@ -360,6 +399,13 @@
     "conflict": "归档内路径冲突: {path} 来自 {first} 和 {second}",
     "not_file_or_dir": "既不是文件也不是目录: {path}",
     "no_files": "输入中没有可打包的文件"
+  },
+  "zlib": {
+    "bad_stream": "zlib 数据损坏（{label}）: {reason}",
+    "limit": "解压结果超过上限 {limit} 字节（{label}）",
+    "incomplete": "zlib 流不完整（{label}）",
+    "trailing": "zlib 流结束后还有 {size} 字节多余数据（{label}）",
+    "length": "解压长度不符: 期望 {expected}, 实际 {actual}（{label}）"
   },
   "settings": {
     "bad_config": "[WARN] 配置文件读取失败，已忽略：{path}（{error}）"

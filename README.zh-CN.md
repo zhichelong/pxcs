@@ -60,8 +60,15 @@ PXCS 先解码成像素，找到参考图，只存变化的部分。
 - **分卷**：拆成 `.001/.002/...`，从任意一卷提取。
 - **加密**：AES-256-GCM + Argon2id，可选加密文件名，每条消息独立 nonce 并绑定归档 id。
   见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。
-- **校验**：`verify` 会真正解码并比对像素/哈希，不只是查 CRC。
-- **并行 create / verify / extract**，带内存预算护栏：预算不够就排队，不会 OOM。
+- **压缩预设与试算**：`--preset lossless|balanced|max|custom`；
+  `--dry-run` 先扫描、精确统计重复、整组抽样实际编码，给出体积区间与建议线程/内存。
+- **校验等级**：`verify --level metadata|quick|full|source`。`quick` 只验 payload
+  CRC/SHA，不重建图片；`full` 才真正解码并比对像素哈希。
+- **读取加固**：有界 zlib 解压、引用链深度校验、KDF 参数读侧上限
+  （高开销参数需 `--allow-expensive-kdf`）。见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。
+- **大文件流式**：≥64 MiB 的非图片文件按块读写，抽样判断是否值得压缩，不整块读入。
+- **并行 create / verify / extract**，带内存预算护栏：预算不够就排队，不会 OOM；
+  摘要会打印真实峰值 RSS。
 - **中英双语界面**：`--language chinese_simp|english`。
 
 ## 快速开始

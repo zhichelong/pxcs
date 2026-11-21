@@ -99,6 +99,9 @@ class ProgressDisplay:
         filled = int(pct // 5)
         bar = "#" * filled + "-" * (20 - filled)
         speed = self._processed / elapsed if elapsed > 0 else 0.0
+        eta = "--:--:--"
+        if speed > 0 and self._processed < self.total_bytes:
+            eta = _elapsed_text((self.total_bytes - self._processed) / speed)
         ratio = (
             self._archive * 100.0 / self._processed
             if self._processed > 0
@@ -110,6 +113,7 @@ class ProgressDisplay:
             t("progress.percent", pct=pct, bar=bar),
             t("progress.files", done=self._done, total=self.total_files),
             t("progress.speed", speed=human_size(int(speed))),
+            t("progress.eta", eta=eta),
             t("progress.total", total=human_size(self.total_bytes)),
             t("progress.processed", processed=human_size(self._processed)),
             t("progress.archive", archive=human_size(self._archive)),

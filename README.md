@@ -69,8 +69,16 @@ delta against.
 - **Volumes**: split into `.001/.002/...`, extract from any volume.
 - **Encryption**: AES-256-GCM + Argon2id, optional filename encryption, per-message nonces
   bound to the archive id. See [SECURITY.md](SECURITY.md).
-- **Verification**: `verify` re-decodes every entry and compares pixels/hashes.
-- **Parallel create / verify / extract**, with a memory budget that throttles instead of OOM.
+- **Presets and dry runs**: `--preset lossless|balanced|max|custom`; `--dry-run` scans,
+  counts exact duplicates, samples whole groups through a real encode, and reports a size
+  range with suggested threads/memory.
+- **Verification levels**: `verify --level metadata|quick|full|source`. `quick` checks
+  payload CRC/SHA without reconstructing images; `full` decodes and compares pixel hashes.
+- **Hardened reading**: bounded zlib decompression, reference-chain depth validation, KDF
+  read limits (high-cost parameters need `--allow-expensive-kdf`). See [SECURITY.md](SECURITY.md).
+- **Streaming for large files**: non-image files of 64 MiB or more are read in chunks, with
+  sampling to decide whether compression pays off.
+- **Parallel create / verify / extract** with a memory budget; the summary reports real peak RSS.
 - **Bilingual UI**: `--language chinese_simp|english`.
 
 ## Quick start

@@ -66,6 +66,17 @@ SCRYPT_LOG2N_MAX = 22
 SCRYPT_R_MAX = 16
 SCRYPT_P_MAX = 8
 
+# 默认读取上限：比硬上限低一档，默认参数（256 MiB / 3 轮 / 4 lane，
+# scrypt 2^17 / r=8 / p=1）全部落在里面。超过这里说明归档用的是自定义
+# 高开销参数，必须由用户显式授权（--allow-expensive-kdf）才派生密钥，
+# 否则一个陌生归档就能让进程先吃掉几 GiB 内存再谈口令对不对。
+READ_ARGON2_MEMORY_MAX = 512 * 1024  # 512 MiB
+READ_ARGON2_ITERATIONS_MAX = 8
+READ_ARGON2_LANES_MAX = 8
+READ_SCRYPT_LOG2N_MAX = 18
+READ_SCRYPT_R_MAX = 8
+READ_SCRYPT_P_MAX = 4
+
 CRYPTO_HEADER_STRUCT = struct.Struct("<8sHHHH16sIII44s32s4sI")
 assert CRYPTO_HEADER_STRUCT.size == CRYPTO_HEADER_SIZE
 
@@ -83,6 +94,74 @@ class PxcAuthenticationError(PxcError):
 
     故意不区分“口令错误”和“数据损坏”，避免给出可区分的攻击信号。
     """
+
+
+class PxcKdfTooExpensive(PxcError):
+    """归档要求的 KDF 参数超过默认读取上限，需要显式授权。
+
+    单独一个异常类型，是为了不和“口令错误”混在一起：参数非法/太贵是
+    关于归档本身的事实，不应该被伪装成认证失败。
+    """
+
+
+# 是否允许超出默认读取上限的 KDF 参数；只由 CLI 的 --allow-expensive-kdf
+# 打开。放在模块级是沿用 set_zlib_level 的既有做法，避免给每个读取 API
+# 都加一个参数。
+_ALLOW_EXPENSIVE_KDF = False
+
+
+def set_allow_expensive_kdf(value: bool) -> None:
+    global _ALLOW_EXPENSIVE_KDF
+    _ALLOW_EXPENSIVE_KDF = bool(value)
+
+
+def allow_expensive_kdf() -> bool:
+    return _ALLOW_EXPENSIVE_KDF
+
+
+def check_kdf_cost(params: "CryptoParams") -> None:
+    """按归档 header 里的参数判断要不要拒绝；在派生密钥之前调用。"""
+    if _ALLOW_EXPENSIVE_KDF:
+        return
+    if params.kdf_id == KDF_ARGON2ID:
+        if (
+            params.param1 > READ_ARGON2_MEMORY_MAX
+            or params.param2 > READ_ARGON2_ITERATIONS_MAX
+            or params.param3 > READ_ARGON2_LANES_MAX
+        ):
+            raise PxcKdfTooExpensive(
+                t(
+                    "crypto.kdf_too_expensive",
+                    kdf="argon2id",
+                    p1=params.param1,
+                    p2=params.param2,
+                    p3=params.param3,
+                    limit=(
+                        f"{READ_ARGON2_MEMORY_MAX} KiB / "
+                        f"{READ_ARGON2_ITERATIONS_MAX} / "
+                        f"{READ_ARGON2_LANES_MAX}"
+                    ),
+                )
+            )
+        return
+    if (
+        params.param1 > READ_SCRYPT_LOG2N_MAX
+        or params.param2 > READ_SCRYPT_R_MAX
+        or params.param3 > READ_SCRYPT_P_MAX
+    ):
+        raise PxcKdfTooExpensive(
+            t(
+                "crypto.kdf_too_expensive",
+                kdf="scrypt",
+                p1=f"log2N={params.param1}",
+                p2=f"r={params.param2}",
+                p3=f"p={params.param3}",
+                limit=(
+                    f"{READ_SCRYPT_LOG2N_MAX} / "
+                    f"{READ_SCRYPT_R_MAX} / {READ_SCRYPT_P_MAX}"
+                ),
+            )
+        )
 
 
 # ---------------------------------------------------------------- 依赖
@@ -458,6 +537,10 @@ def unpack_header(raw: bytes) -> CryptoHeader:
         raise PxcFormatError(t("crypto.unknown_kdf", value=kdf_id))
     if reserved != b"\x00" * 4:
         raise PxcFormatError(t("crypto.header_reserved"))
+    if flags & ~FLAG_NAMES_ENCRYPTED:
+        # 未知 flag 位：旧写入器只产生 0/1。静默忽略会让"未来格式"被
+        # 当成当前格式解析，宁可明确拒绝。
+        raise PxcFormatError(t("crypto.unknown_flags", value=flags))
     zero = bytearray(raw)
     zero[124:128] = b"\x00\x00\x00\x00"
     if crc32(bytes(zero)) != header_crc:
@@ -489,6 +572,9 @@ def open_from_header(
         param3=header.param3,
         encrypt_filenames=header.encrypt_filenames,
     )
+    # 派生密钥之前先看参数开销：恶意 header 要求 2 GiB/64 轮时，
+    # 不能让进程先把内存吃满再去验证口令。
+    check_kdf_cost(params)
     ctx = CryptoContext(password, archive_id, params, header.salt, header.check_blob)
     ctx.verify_check()
     return ctx

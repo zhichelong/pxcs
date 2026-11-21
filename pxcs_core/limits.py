@@ -31,6 +31,10 @@ _MIN_LEASE = 1 * 1024 * 1024
 # 自动预算占"可用物理内存"的比例。
 _AUTO_BUDGET_RATIO = 0.6
 _MIN_BUDGET = 512 * 1024 * 1024
+# 用户显式给 --memory-limit 时的下限：允许压到很小（例如在 CI 里验证排队逻辑），
+# 但不能是 0 或负数（0 表示自动）。旧实现用 max(512 MiB, N) 把 64 MiB
+# 静默改成 512 MiB，用户拿不到自己要求的行为。
+_MIN_EXPLICIT_BUDGET = 16 * 1024 * 1024
 # 键图（每个活跃组的参考图）最多占用预算的这个比例，剩下留给 worker。
 # 这样总内存上界 ≈ 预算 + 0.5×预算 = 1.5×预算，而预算本身是可用内存的 60%，
 # 所以最坏情况约占可用内存的 90%，仍在安全区。
@@ -103,14 +107,69 @@ def available_memory_bytes() -> int:
 
 
 def resolve_memory_budget(limit_mb: Optional[int]) -> int:
-    """``0`` → 可用内存的 60%（不低于 512 MiB）；>0 用指定值。"""
+    """``0`` → 可用内存的 60%（不低于 512 MiB）；>0 用指定值（不低于 16 MiB）。"""
     try:
         value = int(limit_mb or 0)
     except (TypeError, ValueError):
         value = 0
     if value > 0:
-        return max(_MIN_BUDGET, value * 1024 * 1024)
+        return max(_MIN_EXPLICIT_BUDGET, value * 1024 * 1024)
     return max(_MIN_BUDGET, int(available_memory_bytes() * _AUTO_BUDGET_RATIO))
+
+
+def peak_rss_bytes() -> int:
+    """当前进程的峰值常驻内存；拿不到时返回 0。
+
+    内部 lease 计数只能证明"预算逻辑跑了"，不能证明进程没被 OOM 杀。
+    这个值用来和 `MemoryBudget.peak` 对照。
+    """
+    if os.name == "nt":
+        try:
+            class _ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+            # 显式声明原型：GetCurrentProcess 返回的是伪句柄 -1，
+            # 不声明 restype 会被截成 32 位 int，GetProcessMemoryInfo 直接失败
+            # 并返回 0（表现为"峰值永远 0"）。
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(_ProcessMemoryCounters),
+                ctypes.c_ulong,
+            ]
+            psapi.GetProcessMemoryInfo.restype = ctypes.c_bool
+            if psapi.GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(),
+                ctypes.byref(counters),
+                counters.cb,
+            ):
+                return int(counters.PeakWorkingSetSize)
+        except (OSError, AttributeError, ValueError):
+            pass
+        return 0
+    try:
+        with open("/proc/self/status", "r", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def estimate_working_set(

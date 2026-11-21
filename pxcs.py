@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """PXCS 1.3 命令行入口。
 
 PXCS 面向“一批相似图片”的归档：图片在集合内部做跨图差分，
@@ -10,6 +10,7 @@ PXCS 面向“一批相似图片”的归档：图片在集合内部做跨图差
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import getpass
 import re
 import sys
@@ -19,20 +20,25 @@ from typing import Callable, Optional
 from pxc_core.errors import PxcError
 from pxc_core.i18n import configure as configure_i18n
 from pxc_core.i18n import t
-from pxc_core.utils import safe_label
+from pxc_core.utils import human_size, safe_label
 
 from pxcs_core.archive import (
     CreateOptions,
     archive_info,
     create_archive,
     default_output_dir,
+    estimate_archive,
     extract_archive,
     list_entries,
     verify_archive,
 )
 from pxcs_core.container import PxcsSelfCheckError
-from pxcs_core.crypto import PxcAuthenticationError, PxcPasswordRequired
-from pxcs_core.format import VERSION_STRING
+from pxcs_core.crypto import (
+    PxcAuthenticationError,
+    PxcPasswordRequired,
+    set_allow_expensive_kdf,
+)
+from pxcs_core.format import APP_VERSION, VERSION_STRING
 from pxcs_core.settings import load_settings
 from pxcs_core.volumes import DEFAULT_VOLUME_SIZE, MIN_VOLUME_SIZE
 
@@ -133,6 +139,12 @@ def _add_password_input(
             action="store_true",
             help=t("cli.ask_password_help"),
         )
+    else:
+        group.add_argument(
+            "--allow-expensive-kdf",
+            action="store_true",
+            help=t("cli.allow_expensive_kdf_help"),
+        )
 
 
 def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
@@ -176,6 +188,18 @@ def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
         help=t("cli.delta_quant_max_help"),
     )
     parser.add_argument(
+        "--quant-list",
+        type=_parse_quant_list,
+        default=None,
+        metavar="Q,Q,...",
+        help=t("cli.quant_list_help"),
+    )
+    parser.add_argument(
+        "--report-quality",
+        action="store_true",
+        help=t("cli.report_quality_help"),
+    )
+    parser.add_argument(
         "--residual-min-zero",
         type=float,
         default=float(create_cfg.get("residual_min_zero_fraction", 0.40)),
@@ -197,6 +221,17 @@ def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
         "--fast",
         action="store_true",
         help=t("cli.fast_help"),
+    )
+    parser.add_argument(
+        "--preset",
+        choices=("lossless", "balanced", "max", "custom"),
+        default=str(create_cfg.get("preset", "custom")),
+        help=t("cli.preset_help"),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=t("cli.dry_run_help"),
     )
     parser.add_argument(
         "--no-cluster",
@@ -340,11 +375,13 @@ def _add_password_input_read(parser: argparse.ArgumentParser) -> None:
 def build_parser(settings: dict) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pxcs.py",
-        description=t("cli.description", version=VERSION_STRING),
+        description=t("cli.description", version=APP_VERSION),
         epilog=t("cli.epilog"),
     )
     parser.add_argument(
-        "--version", action="version", version=f"PXCS {VERSION_STRING}"
+        "--version",
+        action="version",
+        version=f"PXCS {APP_VERSION} (format {VERSION_STRING})",
     )
     parser.add_argument(
         "--language",
@@ -378,6 +415,12 @@ def build_parser(settings: dict) -> argparse.ArgumentParser:
         "--lossless", action="store_true", help=t("cli.extract_lossless_help")
     )
     extract.add_argument("--overwrite", action="store_true", help=t("cli.overwrite_help"))
+    extract.add_argument(
+        "--on-conflict",
+        choices=("error", "skip", "rename"),
+        default="error",
+        help=t("cli.on_conflict_help"),
+    )
     extract.add_argument("--verbose", action="store_true", help=t("cli.verbose_help"))
     extract.add_argument("--quiet", action="store_true", help=t("cli.quiet_help"))
     _add_password_input_read(extract)
@@ -385,6 +428,12 @@ def build_parser(settings: dict) -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help=t("cli.verify_help"))
     verify.add_argument("archive", help=t("cli.archive_help"))
     verify.add_argument("--quick", action="store_true", help=t("cli.verify_quick_help"))
+    verify.add_argument(
+        "--level",
+        choices=("metadata", "quick", "full", "source"),
+        default=None,
+        help=t("cli.verify_level_help"),
+    )
     _add_password_input_read(verify)
 
     info = sub.add_parser("info", help=t("cli.info_help"))
@@ -591,6 +640,97 @@ def _resolve_read_password(args: argparse.Namespace) -> Optional[str]:
     return _password_from_args(args)
 
 
+def _print_estimate(estimate) -> None:
+    print(t("create.estimate_title"))
+    print(
+        t(
+            "create.estimate_files",
+            files=estimate.files,
+            images=estimate.images,
+            others=estimate.others,
+            groups=estimate.groups,
+        )
+    )
+    print(
+        t(
+            "create.estimate_dups",
+            duplicates=estimate.duplicates,
+            size=human_size(estimate.duplicate_bytes),
+        )
+    )
+    print(
+        t(
+            "create.estimate_size",
+            original=human_size(estimate.original_bytes),
+            estimated=human_size(estimate.estimated_bytes),
+            low=human_size(estimate.estimated_low),
+            high=human_size(estimate.estimated_high),
+        )
+    )
+    print(
+        t(
+            "create.estimate_sample",
+            files=estimate.sampled_files,
+            size=human_size(estimate.sampled_bytes),
+        )
+    )
+    print(
+        t(
+            "create.estimate_advice",
+            threads=estimate.threads,
+            memory=human_size(estimate.memory_bytes),
+        )
+    )
+    if estimate.encryption_ignored:
+        print(t("create.estimate_encryption"))
+
+
+def _apply_create_preset(opts, args):
+    """把 --preset 映射到具体参数；显式 --quant-list/--tree-depth 优先。"""
+    preset = str(getattr(args, "preset", "custom") or "custom")
+    if preset == "custom":
+        return opts
+    if preset == "lossless":
+        # 像素精确：所有图都走像素编码，不做任何量化。
+        changes = dict(algorithm="pixel", delta_quant=0, delta_quant_max=0,
+                       tree_depth=8)
+    elif preset == "balanced":
+        changes = dict(algorithm="auto", delta_quant=12, delta_quant_max=16,
+                       tree_depth=0)
+    else:
+        # 最大压缩：更宽的量化候选、更深的树、更慢但更小的编码器参数。
+        changes = dict(algorithm="auto", delta_quant=8, delta_quant_max=24,
+                       tree_depth=8, zlib_level=9, webp_method=6,
+                       quant_list=(8, 12, 16, 24))
+    if getattr(args, "quant_list", None):
+        changes.pop("quant_list", None)
+    if getattr(args, "tree_depth", 0):
+        changes.pop("tree_depth", None)
+    return replace(opts, **changes)
+
+
+def _parse_quant_list(value: str) -> tuple[int, ...]:
+    """``0,4,8,12,16,24`` -> tuple；最多 8 档，范围 0..255。"""
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    if not parts or len(parts) > 8:
+        raise argparse.ArgumentTypeError(t("cli.quant_list_invalid", value=value))
+    out: list[int] = []
+    for part in parts:
+        try:
+            quant = int(part)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                t("cli.quant_list_invalid", value=value)
+            ) from None
+        if not (0 <= quant <= 255):
+            raise argparse.ArgumentTypeError(
+                t("cli.quant_list_invalid", value=value)
+            )
+        if quant not in out:
+            out.append(quant)
+    return tuple(out)
+
+
 def _memory_limit_mb(value: Optional[str]) -> int:
     """--memory-limit 解析成 MiB；空 / 0 表示自动。"""
     if value is None or str(value).strip() == "":
@@ -645,6 +785,8 @@ def _command_create(args: argparse.Namespace, settings: dict) -> int:
         group_regex_fallback=args.group_regex_fallback,
         delta_quant=args.delta_quant,
         delta_quant_max=args.delta_quant_max,
+        quant_list=args.quant_list or (),
+        report_quality=bool(getattr(args, "report_quality", False)),
         residual_codec=residual_codec,
         tree_depth=int(args.tree_depth or 0),
         residual_min_zero_fraction=args.residual_min_zero,
@@ -661,6 +803,13 @@ def _command_create(args: argparse.Namespace, settings: dict) -> int:
         kdf=args.kdf,
         volume_size=volume_size,
     )
+    opts = _apply_create_preset(opts, args)
+    if str(getattr(args, "preset", "custom")) != "custom" and not args.quiet:
+        print(t("create.preset_note", preset=args.preset))
+    if getattr(args, "dry_run", False):
+        estimate = estimate_archive(output, args.input, opts)
+        _print_estimate(estimate)
+        return 0
     stats = create_archive(output, args.input, opts)
     # 3 = 归档已生成，但有文件被跳过；调用方需要据此判断归档是否完整。
     return 3 if getattr(stats, "skipped", 0) else 0
@@ -682,6 +831,7 @@ def _command_extract(args: argparse.Namespace) -> int:
             verbose=args.verbose,
             quiet=args.quiet,
             password=password,
+            on_conflict=args.on_conflict,
         )
         return 0 if stats.failed == 0 else 1
 
@@ -718,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
             raw_args = ["extract", raw_args[0]]
     if not raw_args:
         # 双击 exe 时没有参数：给出提示并等待拖入/输入归档路径。
-        print(t("cli.no_args_hint", version=VERSION_STRING))
+        print(t("cli.no_args_hint", version=APP_VERSION))
         try:
             value = input(t("cli.archive_prompt")).strip().strip('"')
         except EOFError:
@@ -733,6 +883,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_args)
     if getattr(args, "language", None):
         configure_i18n(args.language)
+    # 高开销 KDF 参数默认拒绝；只有读取类子命令提供显式开关。
+    set_allow_expensive_kdf(bool(getattr(args, "allow_expensive_kdf", False)))
     try:
         if args.command == "create":
             return _command_create(args, settings)
@@ -760,8 +912,9 @@ def main(argv: list[str] | None = None) -> int:
             provided = _resolve_read_password(args)
 
             def run(password: Optional[str]) -> int:
+                level = args.level or ("quick" if args.quick else None)
                 stats = verify_archive(
-                    Path(args.archive), quick=args.quick, password=password
+                    Path(args.archive), level=level, password=password
                 )
                 return 0 if stats.failed == 0 else 1
 
