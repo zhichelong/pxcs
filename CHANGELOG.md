@@ -17,7 +17,7 @@ layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
   Both are module constants (`TREE_MAX_DEPTH`, `TREE_MAX_DEPTH_LOSSLESS`).
 - Measured on 1106 JPEGs / 11.9 GiB of artist variant images: **17.29% -> 9.85%** of
   source size (residual bytes 1222.9 -> 338.4 MiB; key frames unchanged at 833.3 MiB).
-  Wall time also drops, 680.4s -> 443.2s, because smaller residuals compress faster.
+  Wall time also drops by roughly a third, because smaller residuals compress faster.
 - Measured on 73 PNGs / 803 MiB: **22.37% -> 16.64%**, 531s -> 260s.
 - Quality does not regress: deleting the PSNR of 10 deep entries against the depth-3
   build gives **+0.10 dB on average** (max +0.26) — a deeper tree picks a closer
@@ -28,9 +28,9 @@ layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
   the automatic choice (6 lossy / 8 lossless). Lower values make single-image extraction
   cheaper, higher values squeeze the archive further.
 - **Faster tile encoding**: `choose_row_filters` scores all rows in one vectorized pass
-  instead of a Python loop per row (3xH small-array calls per tile). Measured on a
-  2.1 GiB PNG-heavy set: 797s -> 473s (-41%), average parallelism 3.1 -> 4.5 cores,
-  with byte-identical output (all 21 golden vectors unchanged).
+  instead of a Python loop per row (3xH small-array calls per tile). Roughly 40%
+  faster on a PNG-heavy set, with better multi-core utilisation and byte-identical
+  output (all 21 golden vectors unchanged).
 - No format change: the same minors are written.
 
 ## 1.4.0

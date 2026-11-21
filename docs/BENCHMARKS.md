@@ -117,7 +117,7 @@ extra thumbnail pass costs a little. Variant-heavy collections gain 1.4–16.6
 points, and the gain scales with how many variants share the same base drawing.
 
 Speed is not monotonic. Smaller residuals compress faster, so most variant sets
-got *faster* (A18 595s -> 496s, A22 1880s -> 1437s); a few lost ground
+got *faster* (A18 and A22 gained the most); a few lost ground
 because the tree encodes one depth layer at a time.
 
 The cost is decode depth: a cold single-image extraction of a depth-6 entry takes
