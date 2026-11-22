@@ -3,6 +3,30 @@
 格式 minor 0–4 都能读取。本文件记录功能层面的变化；每个 minor 的字节布局见
 [docs/FORMAT.zh-CN.md](docs/FORMAT.zh-CN.md)。
 
+## 1.6.0
+
+**跨组 key 引用**：写一个组的 key 之前，先和已经写入的、同分辨率的 key 比缩略图；
+如果足够像、并且试算出的差分明显小于 keyframe，就直接写成那条 key 的差分。
+
+- 默认范围 `folder`：只和同一个源目录里的 key 比。
+  `--key-ref-scope resolution` 放宽到所有同分辨率 key，`off` 关闭。
+- 只对无损源生效，且只允许“同 mode”或“RGB key -> alpha 为常数的 RGBA 条目”；
+  真正带透明的 RGBA 不会被跨 mode 引用。
+- `--key-ref-distance`（默认 5.0）控制缩略图距离阈值；
+  `--key-ref-min-saving`（默认 0.80）要求差分小于 key 的这个比例才替换。
+- 三个参数都可以写在 `config/config.json` 的 `create` 段里，CLI 默认值从配置读取。
+
+实测（单个 91 张 / 1.75 GiB 作品目录）：7 个 key -> 4 个，归档
+138.62 MiB -> 131.19 MiB（**-5.4%**），创建耗时约 +14%。完整 verify 91/91，
+提取像素与 alpha 完全一致。收益小于“理论上的两个 key 合一”，因为这些
+RGB/RGBA 孪生图的 RGB 内容仍有差异，差分并不是 0。
+
+**格式**：当归档里出现跨 mode 的 ref 时，写成 minor 5。旧读取器（<=1.5）
+会在加载阶段明确拒绝；没有跨 mode ref 的归档仍然写 minor 2/3/4，旧版可读。
+
+**配置**：`config/config.json` 的 `create` 段新增 `key_ref_scope`、
+`key_ref_distance`、`key_ref_min_saving` 三项。
+
 ## 1.5.0
 
 这一版没有改归档格式（minor 仍为 4），重点是把"读取不可信归档"的边界补上，

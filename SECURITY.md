@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the current minor (1.5) is supported. Format minors 0–4 can be *read*; only the
+Only the current minor (1.6) is supported. Format minors 0–4 can be *read*; only the
 newest writer is maintained.
 
 ## Reporting a vulnerability

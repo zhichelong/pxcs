@@ -3,6 +3,34 @@
 Format minors 0-4 are all readable. This file records feature-level changes; the byte
 layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
+## 1.6.0
+
+**Cross-group key references**: before writing a group key, compare its thumbnail with
+already-written keys of the same resolution. If they are close enough and the encoded
+delta is clearly smaller than the keyframe, the key is stored as a delta of that earlier key.
+
+- Default scope is `folder`: only keys from the same source directory are considered.
+  `--key-ref-scope resolution` widens it to all same-resolution keys, `off` disables it.
+- Lossless sources only, and only "same mode" or "RGB key -> RGBA entry with constant
+  alpha". Truly transparent RGBA is never cross-referenced.
+- `--key-ref-distance` (default 5.0) is the thumbnail distance threshold;
+  `--key-ref-min-saving` (default 0.80) requires the delta to be smaller than that
+  fraction of the key.
+- All three can be set in `config/config.json` under `create`; CLI defaults come from
+  the config.
+
+Measured on one 91-image / 1.75 GiB artwork: keys 7 -> 4, archive 138.62 MiB ->
+131.19 MiB (**-5.4%**), create time about +14%. Full verify 91/91 and extracted
+pixels/alpha match. The gain is below "two keys become one" because the RGB content of
+these RGB/RGBA twins still differs, so the delta is not zero.
+
+**Format**: archives containing a cross-mode ref are written as minor 5. Older readers
+(<=1.5) reject them at load time; archives without cross-mode refs still use minor 2/3/4
+and remain readable by older versions.
+
+**Config**: `config/config.json` gains `key_ref_scope`, `key_ref_distance` and
+`key_ref_min_saving` under `create`.
+
 ## 1.5.0
 
 No archive-format change (minor is still 4). This release is about the boundary when

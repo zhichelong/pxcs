@@ -94,7 +94,10 @@
     "verify_level_help": "校验等级：metadata=只看结构，quick=只验 payload CRC/SHA，full=完整解码（默认），source=额外校验源字节可还原",
     "preset_help": "压缩预设：lossless=像素精确（不量化），balanced=默认，max=更小但更慢，custom=用各细项参数",
     "dry_run_help": "只做扫描与抽样估算，不写归档",
-    "report_quality_help": "为有损条目计算并报告实际像素误差与 PSNR（会明显变慢）"
+    "report_quality_help": "为有损条目计算并报告实际像素误差与 PSNR（会明显变慢）",
+    "key_ref_scope_help": "跨组 key 引用范围：folder=只和同目录比（默认），resolution=同分辨率跨目录，off=关闭",
+    "key_ref_distance_help": "跨组引用的最大缩略图距离（0–64，默认 5.0）",
+    "key_ref_min_saving_help": "只有差分小于 key 的这个比例才替换（0.1–1.0，默认 0.80）"
   },
   "create": {
     "summary": "[OK] {path} | {original} -> {archive} ({ratio}) | {groups} 组 / {keys} key | {images} 图 ({deltas} 差分, {lossy} 有损差分, {raw} 原始) | {files} 文件 | {dups} 重复 | {elapsed}s{extra}",
@@ -183,7 +186,10 @@
     "jxl_decode": "JPEG XL 还原失败: {path}: {reason}",
     "chain_too_long": "引用链超过上限: {path}",
     "ref_not_ready": "内部错误：参考图尚未解码: {path}",
-    "option_quant_list": "quant_list 必须是 1–8 个 0–255 的整数"
+    "option_quant_list": "quant_list 必须是 1–8 个 0–255 的整数",
+    "option_key_ref_scope": "key_ref_scope 只能是 folder/resolution/off",
+    "option_key_ref_distance": "key_ref_distance 必须在 0–64",
+    "option_key_ref_saving": "key_ref_min_saving 必须在 0.1–1.0"
   },
   "codec": {
     "mode_no_delta": "模式 {mode} 不支持差分",

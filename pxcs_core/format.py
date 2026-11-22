@@ -15,17 +15,20 @@ PXCS_MAGIC = b"PXCS"
 PXCS_END_MAGIC = b"PXCSEND\x00"
 VERSION_MAJOR = 1
 # 当前最高支持的小版本：1.3 引入加密（分卷不改变格式本身）。
-VERSION_MINOR = 4
+VERSION_MINOR = 5
 VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 # 应用版本（与 pyproject.toml 同源）。格式版本描述字节布局，应用版本描述发布，
 # 两者不要混用：1.5.0 的归档仍然是格式 1.4。
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 # 未加密归档仍按 1.2 写出，保证旧程序还能读新生成的普通归档。
 WRITE_MINOR_PLAIN = 2
 WRITE_MINOR_CRYPTO = 3
 # 1.4：新增 jpegxl 编码（JPEG 无损重打包成 JPEG XL），旧读者会拒绝。
 WRITE_MINOR_JPEGXL = 4
-SUPPORTED_MINORS = (0, 1, 2, 3, 4)
+# 1.6：残差条目的 ref 允许指向不同 mode 的 key（RGB -> 常数 alpha 的 RGBA）。
+# 旧读者会在解码时撞 mode 校验，所以必须写更高的 minor 让它明确拒绝。
+WRITE_MINOR_MODEREF = 5
+SUPPORTED_MINORS = (0, 1, 2, 3, 4, 5)
 
 # 128 字节固定头。
 # magic, major, minor, flags, header_size, entry_count,

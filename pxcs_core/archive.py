@@ -187,6 +187,11 @@ class CreateOptions:
     delta_quant_max: int = 16
     # 显式量化档位（--quant-list）；非空时覆盖 delta_quant/delta_quant_max。
     quant_list: tuple[int, ...] = ()
+    # 跨组 key 引用：新组的 key 如果和已写入的 key 足够像，就写成它的差分。
+    # folder=只和同目录比（默认）；resolution=同分辨率跨目录；off=关闭。
+    key_ref_scope: str = "folder"
+    key_ref_distance: float = 5.0
+    key_ref_min_saving: float = 0.80
     # 是否为每个有损条目计算 max|diff|/PSNR。默认关闭：整图逐像素比较
     # 在 4K 图上要 0.5s 以上，会让默认创建慢 30% 以上。
     report_quality: bool = False
@@ -615,6 +620,32 @@ def _atomic_save_image(
             pass
 
 
+def _expand_ref_to_mode(
+    ref: ImageData, mode: str, constant_alpha: Optional[int]
+) -> ImageData:
+    """把 RGB 参考图补成 RGBA，供跨 mode 的无损差分使用。
+
+    只有“当前条目是 RGBA、参考图是 RGB、且当前 alpha 是常数”时才安全：
+    alpha 平面由常数补出，像素哈希与解码端一致。其它组合原样返回，
+    让下游的 shape/mode 校验照常报错。
+    """
+    if ref.mode == mode:
+        return ref
+    if mode == "RGBA" and ref.mode == "RGB" and constant_alpha is not None:
+        alpha = np.full(
+            (ref.height, ref.width, 1), int(constant_alpha), dtype=ref.data.dtype
+        )
+        data = np.ascontiguousarray(np.concatenate([ref.data, alpha], axis=2))
+        return replace(
+            ref,
+            mode="RGBA",
+            data=data,
+            constant_alpha=int(constant_alpha),
+            pixel_hash=canonical_pixel_hash("RGBA", ref.width, ref.height, data),
+        )
+    return ref
+
+
 class _ImageResolver:
     """按需解码图片，并缓存少量最近图像供差分链使用。"""
 
@@ -734,12 +765,18 @@ class _ImageResolver:
             if entry.ref is None:
                 raise PxcsFormatError(t("archive.residual_need_ref"))
             residual = decode_keyframe(self.reader.read_entry_data(entry))
-            image = reconstruct_image(self._ref_image(entry), residual, entry)
+            ref = _expand_ref_to_mode(
+                self._ref_image(entry), entry.mode, entry.constant_alpha
+            )
+            image = reconstruct_image(ref, residual, entry)
         elif entry.codec == CODEC_ZLIB_RESIDUAL:
             if entry.ref is None:
                 raise PxcsFormatError(t("archive.zlib_residual_need_ref"))
             payload = self.reader.read_entry_data(entry)
-            image = decode_zlib_residual(payload, entry, self._ref_image(entry))
+            ref = _expand_ref_to_mode(
+                self._ref_image(entry), entry.mode, entry.constant_alpha
+            )
+            image = decode_zlib_residual(payload, entry, ref)
         elif entry.codec in {CODEC_RAW, CODEC_JPEGXL}:
             payload = self.reader.read_entry_data(entry)
             if entry.codec == CODEC_JPEGXL:
@@ -931,6 +968,12 @@ def create_archive(
         for value in opts.quant_list:
             if not (0 <= int(value) <= 255):
                 raise PxcsFormatError(t("archive.option_quant_list"))
+    if opts.key_ref_scope not in {"folder", "resolution", "off"}:
+        raise PxcsFormatError(t("archive.option_key_ref_scope"))
+    if not (0.0 <= float(opts.key_ref_distance) <= 64.0):
+        raise PxcsFormatError(t("archive.option_key_ref_distance"))
+    if not (0.1 <= float(opts.key_ref_min_saving) <= 1.0):
+        raise PxcsFormatError(t("archive.option_key_ref_saving"))
     if opts.residual_codec not in {"auto", "zlib", "pxc"}:
         raise PxcsFormatError(t("archive.option_residual_codec"))
     if not (0.0 <= opts.residual_min_zero_fraction <= 1.0):

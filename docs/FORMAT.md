@@ -2,9 +2,10 @@
 
 This document describes the binary layout, version history, and compatibility rules of PXCS. All integers are little-endian.
 
-- Current implementation: 1.4 (supports up to minor=4)
+- Current implementation: 1.6 (supports up to minor=5)
 - Unencrypted archives are written with minor=2 (identical to 1.2)
 - Archives containing jpegxl entries are written with minor=4 (older programs report an unknown codec)
+- Archives containing cross-mode references (RGB key -> constant-alpha RGBA delta) are written with minor=5 (readers <=1.5 reject them)
 - Encrypted archives are written with minor=3
 
 ## 1. Overall Layout
@@ -53,7 +54,7 @@ Structure: `<4sHHIHIQQQ16s4s62sI`
 |---|---|---|---|
 | 0 | 4 | magic | `PXCS` |
 | 4 | 2 | version_major | must be 1 |
-| 6 | 2 | version_minor | 0..4; currently written as 2 / 3 / 4 |
+| 6 | 2 | version_minor | 0..5; currently written as 2 / 3 / 4 / 5 |
 | 8 | 4 | flags | see below |
 | 12 | 2 | header_size | fixed at 128 |
 | 14 | 4 | entry_count | number of entries |
@@ -217,7 +218,7 @@ a payload spanning volumes is read in segments by the read layer and then concat
 Parsing rules:
 
 1. `magic` must be `PXCS`, and `version_major` must be 1;
-2. `version_minor` not in `(0,1,2,3,4)` → `PxcVersionError`;
+2. `version_minor` not in `(0,1,2,3,4,5)` → `PxcVersionError`;
 3. `flags & ENCRYPTED`:
    - permitted only when `minor >= 3`;
    - `data_offset` must equal 256, and the crypto header must be present;
@@ -231,7 +232,8 @@ Written version selection:
 
 - no passphrase → `minor = 2` (readable by older programs);
 - passphrase present → `minor = 3`;
-- whether volume splitting is used does not affect the written minor.
+- whether volume splitting is used does not affect the written minor;
+- a residual entry whose `ref` has a different mode (currently only RGB key -> constant-alpha RGBA) writes minor=5, because older readers would fail the mode check during reconstruction.
 
 ## 8. Known Limitations
 

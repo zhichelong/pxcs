@@ -234,6 +234,26 @@ def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
         help=t("cli.dry_run_help"),
     )
     parser.add_argument(
+        "--key-ref-scope",
+        choices=("folder", "resolution", "off"),
+        default=str(create_cfg.get("key_ref_scope", "folder")),
+        help=t("cli.key_ref_scope_help"),
+    )
+    parser.add_argument(
+        "--key-ref-distance",
+        type=float,
+        default=float(create_cfg.get("key_ref_distance", 5.0)),
+        metavar="N",
+        help=t("cli.key_ref_distance_help"),
+    )
+    parser.add_argument(
+        "--key-ref-min-saving",
+        type=float,
+        default=float(create_cfg.get("key_ref_min_saving", 0.80)),
+        metavar="F",
+        help=t("cli.key_ref_min_saving_help"),
+    )
+    parser.add_argument(
         "--no-cluster",
         action="store_true",
         help=t("cli.no_cluster_help"),
@@ -787,6 +807,9 @@ def _command_create(args: argparse.Namespace, settings: dict) -> int:
         delta_quant_max=args.delta_quant_max,
         quant_list=args.quant_list or (),
         report_quality=bool(getattr(args, "report_quality", False)),
+        key_ref_scope=str(args.key_ref_scope),
+        key_ref_distance=float(args.key_ref_distance),
+        key_ref_min_saving=float(args.key_ref_min_saving),
         residual_codec=residual_codec,
         tree_depth=int(args.tree_depth or 0),
         residual_min_zero_fraction=args.residual_min_zero,

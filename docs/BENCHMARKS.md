@@ -142,3 +142,19 @@ The `verify --quick` gap is not a 180x speedup: 1.4.1's quick still reconstructe
 chains (contradicting its help text), while 1.5.0's quick only checks payload CRC/SHA.
 That is a semantics fix, not a pure optimization. On the same archive, full verification
 still decodes everything and is about 10% faster.
+
+
+## 1.6.0: cross-group key references
+
+One 91-image / 1.75 GiB artwork folder, `--key-ref-scope off` vs the default `folder`:
+
+| Metric | off | folder |
+|---|---:|---:|
+| Keys | 7 | 4 |
+| Key bytes | 55.04 MiB | 32.73 MiB |
+| Archive size | 138.62 MiB | 131.19 MiB (**-5.4%**) |
+| Create time | 177.3 s | 202.3 s (about +14%) |
+
+The three cross-mode RGBA keys became deltas of RGB keys; their keyframes totalled
+22.31 MiB and the deltas 14.88 MiB, so the actual saving is 7.43 MiB. Full verify was
+91/91 and extracted pixels/alpha matched.

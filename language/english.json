@@ -94,7 +94,10 @@
     "verify_level_help": "Verification level: metadata=structure only, quick=payload CRC/SHA only, full=decode everything (default), source=also verify source bytes",
     "preset_help": "Compression preset: lossless=pixel exact (no quantization), balanced=default, max=smaller but slower, custom=use individual flags",
     "dry_run_help": "Scan and sample-estimate only; write no archive",
-    "report_quality_help": "Compute and report actual pixel error and PSNR for lossy entries (slower)"
+    "report_quality_help": "Compute and report actual pixel error and PSNR for lossy entries (slower)",
+    "key_ref_scope_help": "Cross-group key references: folder=same directory only (default), resolution=all same-resolution keys, off=disable",
+    "key_ref_distance_help": "Max thumbnail distance for cross-group references (0-64, default 5.0)",
+    "key_ref_min_saving_help": "Replace the key only if the delta is smaller than this fraction of it (0.1-1.0, default 0.80)"
   },
   "create": {
     "summary": "[OK] {path} | {original} -> {archive} ({ratio}) | {groups} groups / {keys} keys | {images} images ({deltas} deltas, {lossy} lossy, {raw} raw) | {files} files | {dups} dups | {elapsed}s{extra}",
@@ -183,7 +186,10 @@
     "jxl_decode": "JPEG XL restore failed: {path}: {reason}",
     "chain_too_long": "Reference chain exceeds the limit: {path}",
     "ref_not_ready": "Internal error: reference image is not decoded yet: {path}",
-    "option_quant_list": "quant_list must contain 1-8 integers in 0..255"
+    "option_quant_list": "quant_list must contain 1-8 integers in 0..255",
+    "option_key_ref_scope": "key_ref_scope must be folder/resolution/off",
+    "option_key_ref_distance": "key_ref_distance must be within 0-64",
+    "option_key_ref_saving": "key_ref_min_saving must be within 0.1-1.0"
   },
   "codec": {
     "mode_no_delta": "Mode {mode} does not support delta",

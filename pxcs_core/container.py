@@ -78,6 +78,7 @@ from .format import (
     VERSION_MINOR,
     WRITE_MINOR_CRYPTO,
     WRITE_MINOR_JPEGXL,
+    WRITE_MINOR_MODEREF,
     WRITE_MINOR_PLAIN,
 )
 from .paths import normalize_rel_path
@@ -450,6 +451,16 @@ class ArchiveWriter:
             minor = WRITE_MINOR_CRYPTO if self.crypto else WRITE_MINOR_PLAIN
             if any(e.codec == CODEC_JPEGXL for e in entries):
                 minor = max(minor, WRITE_MINOR_JPEGXL)
+            if any(
+                e.ref is not None
+                and e.kind == "image"
+                and 0 <= e.ref < len(entries)
+                and entries[e.ref].mode != e.mode
+                for e in entries
+            ):
+                # 残差参考了不同 mode 的 key：旧读者会在 reconstruct 时失败，
+                # 用更高的 minor 让它在加载阶段就明确拒绝。
+                minor = max(minor, WRITE_MINOR_MODEREF)
             if self.crypto is not None:
                 flags = flags | FLAG_ENCRYPTED
             header_zero = HEADER_STRUCT.pack(

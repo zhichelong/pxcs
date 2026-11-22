@@ -18,7 +18,7 @@ import os
 import sys
 import time
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -44,6 +44,7 @@ from .archive import (
     _RAW_IMAGE_FORMATS,
     _LOSSLESS_FORMATS,
     summary_text,
+    _expand_ref_to_mode,
 )
 from .codec import (
     encode_keyframe,
@@ -71,6 +72,7 @@ from .format import (
     CODEC_ZLIB,
     CODEC_ZLIB_RESIDUAL,
     RESIDUAL_CODECS,
+    MAX_DEPTH,
 )
 from .limits import (
     MemoryBudget,
@@ -636,6 +638,23 @@ def _looks_compressible(path: Path, size: int) -> bool:
     if raw_total <= 0:
         return False
     return comp_total < raw_total * 0.9
+
+
+def _cross_ref_modes_ok(
+    parent_mode: str,
+    parent_alpha: Optional[int],
+    child_mode: str,
+    child_alpha: Optional[int],
+) -> bool:
+    """跨 mode 引用只允许“同 mode”或“RGB 父 -> 常数 alpha 的 RGBA 子”。"""
+    if parent_mode == child_mode:
+        return True
+    return (
+        parent_mode == "RGB"
+        and child_mode == "RGBA"
+        and child_alpha is not None
+        and parent_alpha is None
+    )
 
 
 def _group_is_lossy(items: list[WorkItem]) -> bool:
@@ -1295,6 +1314,8 @@ def create_grouped_archive(
     entries: list[ArchiveEntry] = []
     raw_hash_index: dict[str, int] = {}
     executor = cf.ThreadPoolExecutor(max_workers=threads)
+    # 已写入的 key 候选表：跨组引用只允许指向更早提交的 key（ref < id）。
+    key_registry: list[dict] = []
     states: list[_GroupState] = []
     next_group = 0
     done_entries = 0
@@ -1356,6 +1377,51 @@ def create_grouped_archive(
             failures.append((candidate, result.error))
         return -1, None, None, failures
 
+    def _pick_cross_key_parent(
+        state: _GroupState, key_item: WorkItem, result: _Result
+    ) -> Optional[dict]:
+        """在已经写入的 key 里找一个可安全引用的父节点。"""
+        if opts.key_ref_scope == "off":
+            return None
+        if _group_is_lossy(state.members):
+            return None
+        if result.codec not in {CODEC_PXC, CODEC_WEBP_LOSSLESS}:
+            return None
+        if result.mode not in {"RGB", "RGBA"}:
+            return None
+        if result.mode == "RGBA" and result.constant_alpha is None:
+            return None
+        thumb = None
+        if state.thumbs and state.key_index < len(state.thumbs):
+            thumb = state.thumbs[state.key_index]
+        if thumb is None:
+            thumb = _file_thumbnail(key_item.source.path)
+        if thumb is None:
+            return None
+        folder = os.path.normcase(str(key_item.source.path.parent))
+        best: Optional[tuple[float, dict]] = None
+        for cand in key_registry:
+            if cand["width"] != result.width or cand["height"] != result.height:
+                continue
+            if opts.key_ref_scope == "folder" and cand["folder"] != folder:
+                continue
+            if not _cross_ref_modes_ok(
+                cand["mode"], cand["constant_alpha"],
+                result.mode, result.constant_alpha,
+            ):
+                continue
+            parent_entry = entries[cand["id"]]
+            if parent_entry.depth >= MAX_DEPTH - 1:
+                continue
+            dist = float(
+                np.abs(cand["thumb"].astype(np.int16) - thumb.astype(np.int16)).mean()
+            )
+            if dist > float(opts.key_ref_distance):
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, cand)
+        return best[1] if best else None
+
     def commit_group_key(
         state: _GroupState,
         packed: tuple[
@@ -1385,7 +1451,32 @@ def create_grouped_archive(
         except OSError as exc:
             record_skipped(key_item, f"{type(exc).__name__}: {exc}")
             return False
-        state.key_depth = 0
+        cross_parent = _pick_cross_key_parent(state, key_item, result)
+        cross_depth = 0
+        if cross_parent is not None:
+            try:
+                parent_image = load_image(
+                    cross_parent["path"],
+                    compute_file_hash=False,
+                    compute_source_pixel_hash=False,
+                )
+                parent_image = _expand_ref_to_mode(
+                    parent_image, result.mode, result.constant_alpha
+                )
+                delta = _encode_delta_body(
+                    parent_image, cross_parent["id"], key_item, opts, keep_image=True
+                )
+            except (PxcError, OSError) as exc:
+                delta = _Result(item=key_item, error=f"{type(exc).__name__}: {exc}")
+            if (
+                not delta.error
+                and delta.codec in RESIDUAL_CODECS
+                and len(delta.payload) < len(result.payload) * float(opts.key_ref_min_saving)
+            ):
+                delta.reason = "cross_key"
+                result = delta
+                cross_depth = entries[cross_parent["id"]].depth + 1
+        state.key_depth = cross_depth
         state.key_id = len(entries)
         payload = result.payload
         if result.codec == CODEC_RAW and result.raw_crc == 0 and payload:
@@ -1408,9 +1499,11 @@ def create_grouped_archive(
             ext=_source_ext(key_item.source.path),
             constant_alpha=result.constant_alpha,
             pixel_sha256=result.approx_hash,
-            quant=0,
-            centered=False,
-            lossy=False,
+            quant=result.quant,
+            centered=result.centered,
+            lossy=result.lossy,
+            ref=cross_parent["id"] if cross_parent is not None and cross_depth else None,
+            depth=cross_depth,
             reason=result.reason or "key",
         )
         entries.append(entry)
@@ -1420,6 +1513,10 @@ def create_grouped_archive(
         stats.images += 1
         if result.codec in {CODEC_RAW, CODEC_JPEGXL}:
             stats.raw_images += 1
+        elif result.codec in RESIDUAL_CODECS:
+            stats.deltas += 1
+            if result.lossy:
+                stats.lossy_deltas += 1
         elif result.codec in {CODEC_PXC, CODEC_WEBP_LOSSLESS}:
             stats.keyframes += 1
         processed_bytes += entry.size
@@ -1427,6 +1524,25 @@ def create_grouped_archive(
         tasks_done += 1
         tasks_bytes += entry.size
         state.key_image = result.image
+        thumb = None
+        if state.thumbs and state.key_index < len(state.thumbs):
+            thumb = state.thumbs[state.key_index]
+        if thumb is None:
+            thumb = _file_thumbnail(key_item.source.path)
+        if thumb is not None and result.width > 0 and result.height > 0:
+            key_registry.append(
+                {
+                    "id": entry.id,
+                    "path": key_item.source.path,
+                    "folder": os.path.normcase(str(key_item.source.path.parent)),
+                    "width": result.width,
+                    "height": result.height,
+                    "mode": result.mode,
+                    "constant_alpha": result.constant_alpha,
+                    "depth": entry.depth,
+                    "thumb": thumb,
+                }
+            )
         update_progress(key_item.source.rel)
         progress.detail(
             t(

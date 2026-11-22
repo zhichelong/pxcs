@@ -131,3 +131,19 @@ python -m tools.pxcs_suite --all --out report.json
 `verify --quick` 的差距不能直接当成"快 180 倍"：1.4.1 的 quick 对残差条目仍然整链
 重建（和帮助文案矛盾），1.5.0 的 quick 只校验 payload CRC/SHA。这是语义修正，
 不是纯性能优化。同一份归档上 `test_full` 仍然走完整解码，快了约 10%。
+
+
+## 1.6.0：跨组 key 引用
+
+一个 91 张 / 1.75 GiB 的作品目录，对比 `--key-ref-scope off`
+与默认 `folder`：
+
+| 指标 | off | folder |
+|---|---:|---:|
+| key 数量 | 7 | 4 |
+| key 字节 | 55.04 MiB | 32.73 MiB |
+| 归档体积 | 138.62 MiB | 131.19 MiB（**−5.4%**） |
+| 创建耗时 | 177.3 s | 202.3 s（约 +14%） |
+
+跨 mode 的三个 RGBA key 被写成 RGB key 的差分；它们的 keyframe 合计 22.31 MiB，
+差分合计 14.88 MiB，所以实际只省 7.43 MiB。完整 verify 91/91，提取像素与 alpha 一致。
