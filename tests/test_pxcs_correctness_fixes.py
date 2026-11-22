@@ -190,7 +190,7 @@ class MetadataResidualTest(unittest.TestCase):
         create_archive(
             out, [str(src)],
             CreateOptions(quiet=True, progress=False, threads=2,
-                          residual_codec="zlib"),
+                          residual_codec="zlib", key_ref_scope="folder"),
         )
         with ArchiveReader(out) as reader:
             rgba_entry = next(e for e in reader.entries if e.path.endswith("b.png"))
@@ -283,7 +283,8 @@ class MinorGateTest(unittest.TestCase):
         out = self.root / "a.pxcs"
         create_archive(
             out, [str(src)],
-            CreateOptions(quiet=True, progress=False, threads=2),
+            CreateOptions(quiet=True, progress=False, threads=2,
+                          key_ref_scope="folder"),
         )
         with ArchiveReader(out) as reader:
             self.assertEqual(reader.header.version_minor, 5)

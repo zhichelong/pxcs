@@ -62,7 +62,7 @@ class CrossKeyRefTest(unittest.TestCase):
         arr = _base()
         _save_rgb(src / "a.png", arr)
         _save_rgba(src / "b.png", arr)
-        out = self._create(src)
+        out = self._create(src, key_ref_scope="folder")
         with ArchiveReader(out) as reader:
             rgb = next(e for e in reader.entries if e.path.endswith("a.png"))
             rgba = next(e for e in reader.entries if e.path.endswith("b.png"))
@@ -101,7 +101,7 @@ class CrossKeyRefTest(unittest.TestCase):
         arr = _base(7)
         _save_rgb(d1 / "a.png", arr)
         _save_rgba(d2 / "b.png", arr)
-        out = self._create(parent)
+        out = self._create(parent, key_ref_scope="folder")
         with ArchiveReader(out) as reader:
             rgba = next(e for e in reader.entries if e.path.endswith("b.png"))
             self.assertNotIn(rgba.codec, {"pxc_residual", "zlib_residual"})
@@ -129,12 +129,29 @@ class CrossKeyRefTest(unittest.TestCase):
         arr = _base(9)
         _save_rgb(src / "a.png", arr)
         _save_rgba(src / "b.png", arr, alpha=None)
-        out = self._create(src)
+        out = self._create(src, key_ref_scope="folder")
         with ArchiveReader(out) as reader:
             rgba = next(e for e in reader.entries if e.path.endswith("b.png"))
             self.assertNotIn(rgba.codec, {"pxc_residual", "zlib_residual"})
 
+    def test_default_scope_is_off(self) -> None:
+        src = self.root / "default_off"
+        src.mkdir()
+        arr = _base(11)
+        _save_rgb(src / "a.png", arr)
+        _save_rgba(src / "b.png", arr)
+        out = self.root / "default.pxcs"
+        create_archive(
+            out, [str(src)],
+            CreateOptions(quiet=True, progress=False, threads=2),
+        )
+        with ArchiveReader(out) as reader:
+            rgba = next(e for e in reader.entries if e.path.endswith("b.png"))
+            self.assertNotIn(rgba.codec, {"pxc_residual", "zlib_residual"})
+            self.assertLessEqual(reader.header.version_minor, 5)
+
     def test_invalid_scope_rejected(self) -> None:
+
         src = self.root / "four"
         src.mkdir()
         _save_rgb(src / "a.png", _base(10))

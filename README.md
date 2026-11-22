@@ -64,10 +64,11 @@ delta against.
   group key. Works for JPEG, PNG, TIFF, WebP and raw RGBA.
 - **Per-image codec choice**: every entry independently falls back to `raw` if the delta
   is not smaller, so a bad grouping costs at most the wasted attempt, never size.
-- **Cross-group key references**: a new group key that closely matches an already-written
-  key of the same resolution is stored as its delta, so one artwork split by RGB/RGBA or
-  by cluster boundaries does not pay two keyframes. Default scope is the same directory;
-  `--key-ref-scope resolution` widens it across directories.
+- **Cross-group key references (opt-in)**: a new group key that closely matches an
+  already-written key of the same resolution can be stored as its delta, so one artwork
+  split by RGB/RGBA or by cluster boundaries does not pay two keyframes. **Off by
+  default**; `--key-ref-scope folder` compares within a directory, `resolution` across
+  directories.
 - **JPEG XL lossless repacking** (`jpegxl` codec): JPEGs are transcoded to JXL and restored
   **byte for byte** on extraction, typically 20–27% smaller.
 - **Volumes**: split into `.001/.002/...`, extract from any volume.

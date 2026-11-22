@@ -19,7 +19,7 @@
     "threads": 0,
     "parallel_groups": 0,
     "residual_codec": "auto",
-    "key_ref_scope": "folder",
+    "key_ref_scope": "off",
     "key_ref_distance": 5.0,
     "key_ref_min_saving": 0.8,
     "group_regex_fallback": "resolution",

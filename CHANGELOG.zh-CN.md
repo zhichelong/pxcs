@@ -8,8 +8,8 @@
 **跨组 key 引用**：写一个组的 key 之前，先和已经写入的、同分辨率的 key 比缩略图；
 如果足够像、并且试算出的差分明显小于 keyframe，就直接写成那条 key 的差分。
 
-- 默认范围 `folder`：只和同一个源目录里的 key 比。
-  `--key-ref-scope resolution` 放宽到所有同分辨率 key，`off` 关闭。
+- **默认关闭**（`key_ref_scope=off`）。需要时用 `--key-ref-scope folder` 只比同目录，
+  或 `resolution` 放宽到所有同分辨率 key。
 - 只对无损源生效，且只允许“同 mode”或“RGB key -> alpha 为常数的 RGBA 条目”；
   真正带透明的 RGBA 不会被跨 mode 引用。
 - `--key-ref-distance`（默认 5.0）控制缩略图距离阈值；

@@ -36,7 +36,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "residual_min_zero_fraction": 0.40,
         "residual_codec": "auto",
         # 跨组 key 引用：folder=只和同目录的 key 比（默认）；resolution=同分辨率跨目录；off=关闭
-        "key_ref_scope": "folder",
+        "key_ref_scope": "off",
         "key_ref_distance": 5.0,
         "key_ref_min_saving": 0.80,
         "threads": 0,           # 0 = 用满所有核心
@@ -122,7 +122,7 @@ def load_settings() -> dict[str, Any]:
     if create.get("residual_codec") not in {"auto", "zlib", "pxc"}:
         create["residual_codec"] = "auto"
     if create.get("key_ref_scope") not in {"folder", "resolution", "off"}:
-        create["key_ref_scope"] = "folder"
+        create["key_ref_scope"] = "off"
     for key, default, lo, hi in (
         ("key_ref_distance", 5.0, 0.0, 64.0),
         ("key_ref_min_saving", 0.80, 0.1, 1.0),

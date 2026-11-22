@@ -135,8 +135,8 @@ python -m tools.pxcs_suite --all --out report.json
 
 ## 1.6.0：跨组 key 引用
 
-一个 91 张 / 1.75 GiB 的作品目录，对比 `--key-ref-scope off`
-与默认 `folder`：
+一个 91 张 / 1.75 GiB 的作品目录，对比 `--key-ref-scope off`（默认）
+与显式 `folder`：
 
 | 指标 | off | folder |
 |---|---:|---:|

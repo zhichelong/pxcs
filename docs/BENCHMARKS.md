@@ -146,7 +146,7 @@ still decodes everything and is about 10% faster.
 
 ## 1.6.0: cross-group key references
 
-One 91-image / 1.75 GiB artwork folder, `--key-ref-scope off` vs the default `folder`:
+One 91-image / 1.75 GiB artwork folder, `--key-ref-scope off` (default) vs explicit `folder`:
 
 | Metric | off | folder |
 |---|---:|---:|

@@ -236,7 +236,7 @@ def _add_common_create(parser: argparse.ArgumentParser, settings: dict) -> None:
     parser.add_argument(
         "--key-ref-scope",
         choices=("folder", "resolution", "off"),
-        default=str(create_cfg.get("key_ref_scope", "folder")),
+        default=str(create_cfg.get("key_ref_scope", "off")),
         help=t("cli.key_ref_scope_help"),
     )
     parser.add_argument(

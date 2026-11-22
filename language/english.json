@@ -95,7 +95,7 @@
     "preset_help": "Compression preset: lossless=pixel exact (no quantization), balanced=default, max=smaller but slower, custom=use individual flags",
     "dry_run_help": "Scan and sample-estimate only; write no archive",
     "report_quality_help": "Compute and report actual pixel error and PSNR for lossy entries (slower)",
-    "key_ref_scope_help": "Cross-group key references: folder=same directory only (default), resolution=all same-resolution keys, off=disable",
+    "key_ref_scope_help": "Cross-group key references: off=disabled (default), folder=same directory only, resolution=all same-resolution keys",
     "key_ref_distance_help": "Max thumbnail distance for cross-group references (0-64, default 5.0)",
     "key_ref_min_saving_help": "Replace the key only if the delta is smaller than this fraction of it (0.1-1.0, default 0.80)"
   },

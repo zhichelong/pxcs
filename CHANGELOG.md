@@ -9,8 +9,8 @@ layout of each minor is specified in [docs/FORMAT.md](docs/FORMAT.md).
 already-written keys of the same resolution. If they are close enough and the encoded
 delta is clearly smaller than the keyframe, the key is stored as a delta of that earlier key.
 
-- Default scope is `folder`: only keys from the same source directory are considered.
-  `--key-ref-scope resolution` widens it to all same-resolution keys, `off` disables it.
+- **Off by default** (`key_ref_scope=off`). Opt in with `--key-ref-scope folder` for
+  same-directory keys, or `resolution` for all same-resolution keys.
 - Lossless sources only, and only "same mode" or "RGB key -> RGBA entry with constant
   alpha". Truly transparent RGBA is never cross-referenced.
 - `--key-ref-distance` (default 5.0) is the thumbnail distance threshold;

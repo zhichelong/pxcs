@@ -189,7 +189,7 @@ class CreateOptions:
     quant_list: tuple[int, ...] = ()
     # 跨组 key 引用：新组的 key 如果和已写入的 key 足够像，就写成它的差分。
     # folder=只和同目录比（默认）；resolution=同分辨率跨目录；off=关闭。
-    key_ref_scope: str = "folder"
+    key_ref_scope: str = "off"
     key_ref_distance: float = 5.0
     key_ref_min_saving: float = 0.80
     # 是否为每个有损条目计算 max|diff|/PSNR。默认关闭：整图逐像素比较
