@@ -278,7 +278,8 @@
     "stream_encrypted": "加密归档不支持流式写入 payload",
     "stream_short": "文件在写入过程中变短: {path}",
     "stream_changed": "文件在扫描后发生变化: {path}",
-    "minor_feature": "归档 minor {minor} 不支持 {feature}（需要 minor {required}）"
+    "minor_feature": "归档 minor {minor} 不支持 {feature}（需要 minor {required}）",
+    "cross_mode_ref": "条目 {id} 的跨 mode 引用不合法（只允许 RGB 父 -> 常数 alpha 的 RGBA 子）"
   },
   "crypto": {
     "missing_library": "缺少 cryptography 依赖，无法处理加密归档（pip install cryptography）",

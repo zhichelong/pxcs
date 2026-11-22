@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageCms
 
 from pxc_core.zlibsafe import decompress_bounded
 from pxc_core.codec import decode_tiles
@@ -35,6 +35,7 @@ from pxcs_core.archive import (
 )
 from pxcs_core.container import ArchiveReader
 from pxcs_core.format import HEADER_STRUCT
+from tests.test_pxcs_zlib_bounds import _build_archive
 from pxcs_core.grouped_create import _local_plan_depth
 
 
@@ -175,6 +176,29 @@ class MetadataResidualTest(unittest.TestCase):
         exif = Image.open(extracted).getexif()
         self.assertEqual(exif.get(0x010E), "pxcs test")
 
+    def test_cross_key_zlib_residual_keeps_meta(self) -> None:
+        src = self.root / "cross_meta"
+        src.mkdir()
+        arr = _base(40)
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        Image.fromarray(arr, "RGB").save(src / "a.png")
+        rgba = np.concatenate(
+            [arr, np.full(arr.shape[:2] + (1,), 255, np.uint8)], axis=2
+        )
+        Image.fromarray(rgba, "RGBA").save(src / "b.png", icc_profile=icc)
+        out = self.root / "cross_meta.pxcs"
+        create_archive(
+            out, [str(src)],
+            CreateOptions(quiet=True, progress=False, threads=2,
+                          residual_codec="zlib"),
+        )
+        with ArchiveReader(out) as reader:
+            rgba_entry = next(e for e in reader.entries if e.path.endswith("b.png"))
+            self.assertEqual(rgba_entry.codec, "zlib_residual")
+            self.assertTrue(rgba_entry.meta and rgba_entry.meta.get("icc"))
+            self.assertEqual(reader.header.version_minor, 6)
+        self.assertEqual(verify_archive(out).failed, 0)
+
     def test_without_metadata_still_uses_zlib(self) -> None:
         src = self._make("no_exif", False)
         out = self.root / "without.pxcs"
@@ -204,6 +228,48 @@ class MinorGateTest(unittest.TestCase):
         fields[12] = zlib.crc32(zero) & 0xFFFFFFFF
         HEADER_STRUCT.pack_into(raw, 0, *fields)
         path.write_bytes(bytes(raw))
+
+    def _craft_invalid_cross_mode(self, path: Path) -> None:
+        png = Path(self.root / "tiny.png")
+        Image.fromarray(_base(50, (8, 8)), "RGB").save(png)
+        payload = png.read_bytes()
+        entries = [
+            {
+                "id": 0, "path": "a.png", "kind": "image", "codec": "raw",
+                "offset": 0, "length": 0, "size": len(payload), "ref": None,
+                "depth": 0, "width": 8, "height": 8, "mode": "RGB",
+                "format": "PNG", "ext": ".png", "constant_alpha": None,
+                "quant": 0, "centered": True, "lossy": False,
+                "pixel_sha256": "", "source_sha256": "", "data_crc32": 0,
+                "raw_crc32": 0, "data_sha256": "", "mtime_ns": 0,
+                "flags": 0, "reason": "",
+            },
+            {
+                "id": 1, "path": "b.png", "kind": "image",
+                "codec": "pxc_residual", "offset": 0, "length": 0, "size": 8,
+                "ref": 0, "depth": 1, "width": 8, "height": 8, "mode": "RGBA",
+                "format": "PNG", "ext": ".png", "constant_alpha": None,
+                "quant": 0, "centered": True, "lossy": False,
+                "pixel_sha256": "", "source_sha256": "", "data_crc32": 0,
+                "raw_crc32": 0, "data_sha256": "", "mtime_ns": 0,
+                "flags": 0, "reason": "",
+            },
+        ]
+        _build_archive(path, entries, [payload, b"x" * 8])
+        raw = bytearray(path.read_bytes())
+        fields = list(HEADER_STRUCT.unpack_from(raw, 0))
+        fields[2] = 5
+        zero = HEADER_STRUCT.pack(*fields[:12], 0)
+        fields[12] = zlib.crc32(zero) & 0xFFFFFFFF
+        HEADER_STRUCT.pack_into(raw, 0, *fields)
+        path.write_bytes(bytes(raw))
+
+    def test_invalid_cross_mode_semantics_rejected(self) -> None:
+        path = self.root / "bad_cross.pxcs"
+        self._craft_invalid_cross_mode(path)
+        with self.assertRaises(PxcsFormatError):
+            with ArchiveReader(path):
+                pass
 
     def test_cross_mode_ref_requires_minor_5(self) -> None:
         src = self.root / "src"

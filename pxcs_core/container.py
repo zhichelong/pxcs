@@ -537,6 +537,7 @@ class ArchiveReader:
         *,
         password: Optional[str] = None,
         source: Optional[ArchiveSource] = None,
+        allow_expensive_kdf: Optional[bool] = None,
     ) -> None:
         if source is None:
             if path is None:
@@ -553,6 +554,7 @@ class ArchiveReader:
         self.crypto_header: Optional[CryptoHeader] = None
         self._entry_by_id: dict[int, ArchiveEntry]
         self._fh = None  # 兼容旧代码里对 reader._fh 的探测
+        self._allow_expensive_kdf = allow_expensive_kdf
         try:
             self._read_all(password)
         except Exception:
@@ -640,7 +642,10 @@ class ArchiveReader:
             raise PxcsFormatError(t("container.header_reserved"))
         if entry_count > MAX_ENTRIES:
             raise PxcsFormatError(t("container.entry_count", count=entry_count))
-        if not (HEADER_SIZE <= index_offset <= file_size - FOOTER_SIZE):
+        expected_data_offset = (
+            DATA_OFFSET_CRYPTO if (flags & FLAG_ENCRYPTED) else DATA_OFFSET_PLAIN
+        )
+        if not (expected_data_offset <= index_offset <= file_size - FOOTER_SIZE):
             raise PxcsFormatError(t("container.index_offset"))
         if index_length > file_size - FOOTER_SIZE - index_offset:
             raise PxcsFormatError(t("container.index_length"))
@@ -664,7 +669,10 @@ class ArchiveReader:
             raw_crypto = self._source.read_at(HEADER_SIZE, CRYPTO_HEADER_SIZE)
             header = unpack_header(raw_crypto)
             self.crypto_header = header
-            self.crypto = open_from_header(header, password, archive_id)
+            self.crypto = open_from_header(
+                header, password, archive_id,
+                allow_expensive=self._allow_expensive_kdf,
+            )
         else:
             if data_offset != DATA_OFFSET_PLAIN:
                 raise PxcsFormatError(t("container.data_offset"))
@@ -853,6 +861,23 @@ class ArchiveReader:
                     )
                 )
             chain_depths.append(real_depth)
+
+        # 跨 mode 引用只允许“RGB 父 -> 常数 alpha 的 RGBA 子”；
+        # 其它组合即使 minor 足够也拒绝，避免 metadata-only 校验通过。
+        for entry in entries:
+            if entry.kind != "image" or entry.ref is None:
+                continue
+            ref_entry = entries[entry.ref]
+            if ref_entry.mode == entry.mode:
+                continue
+            if not (
+                ref_entry.mode == "RGB"
+                and entry.mode == "RGBA"
+                and entry.constant_alpha is not None
+            ):
+                raise PxcsFormatError(
+                    t("container.cross_mode_ref", id=entry.id)
+                )
 
         # 特性与 minor 的一致性：新语义不允许伪装成旧 minor。
         if minor < WRITE_MINOR_JPEGXL and any(

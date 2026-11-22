@@ -59,7 +59,22 @@ and remain readable by older versions.
   not imply full tile <=256, but a full tile <=256 always samples <=256, so sampling
   never misses a usable palette.
 
-Tests: 283.
+- **Cross-group key zlib residual dropped `meta`**: `commit_group_key()` rebuilt the
+  key entry without passing `meta`, so cross-group references with `--fast` /
+  `residual_codec=zlib` lost ICC/EXIF. Fixed.
+- **`total_source` stat was unguarded**: a file deleted or made unreadable after the
+  scan no longer aborts the whole create; it is skipped and left to the worker's
+  skipped accounting.
+- **KDF global-state race**: self-check now passes an explicit
+  `allow_expensive_kdf=True` to `ArchiveReader` instead of temporarily mutating the
+  process-wide flag.
+- **Encrypted index lower bound**: `index_offset` must now be at least `data_offset`
+  (256 for encrypted archives) and can no longer overlap the Crypto Header.
+- **Cross-mode reference semantics**: even with a sufficient minor, the reader now
+  requires "RGB parent -> constant-alpha RGBA child" at load time instead of failing
+  during decode.
+
+Tests: 285.
 
 ## 1.5.0
 

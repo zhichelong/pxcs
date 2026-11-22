@@ -563,8 +563,14 @@ def open_from_header(
     header: CryptoHeader,
     password: str,
     archive_id: bytes,
+    *,
+    allow_expensive: Optional[bool] = None,
 ) -> CryptoContext:
-    """按 header 派生密钥并验证校验块；口令错误/篡改都抛认证错误。"""
+    """按 header 派生密钥并验证校验块；口令错误/篡改都抛认证错误。
+
+    ``allow_expensive`` 为 None 时使用进程级策略；自检等可信场景可以显式放行，
+    避免修改全局状态。
+    """
     params = CryptoParams(
         kdf_id=header.kdf_id,
         param1=header.param1,
@@ -574,7 +580,10 @@ def open_from_header(
     )
     # 派生密钥之前先看参数开销：恶意 header 要求 2 GiB/64 轮时，
     # 不能让进程先把内存吃满再去验证口令。
-    check_kdf_cost(params)
+    if allow_expensive is None:
+        check_kdf_cost(params)
+    elif not allow_expensive:
+        check_kdf_cost(params)
     ctx = CryptoContext(password, archive_id, params, header.salt, header.check_blob)
     ctx.verify_check()
     return ctx

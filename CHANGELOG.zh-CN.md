@@ -51,7 +51,19 @@ RGB/RGBA 孪生图的 RGB 内容仍有差异，差分并不是 0。
   完整 tile ≤256，但完整 tile ≤256 时采样一定 ≤256，所以采样不会漏掉
   可用的 palette（文档不再暗示它会）。
 
-测试：283 条。
+- **跨组 key 的 zlib 残差漏 meta**：`commit_group_key()` 重建 key 条目时
+  忘记传 `meta`，使用 `--fast`/`residual_codec=zlib` 的跨组引用会丢 ICC/EXIF。
+  已补上。
+- **`total_source` 的 stat 未兜底**：扫描后文件被删/不可访问不再让整次创建
+  直接崩溃，改为跳过并留给 worker 记录。
+- **KDF 全局状态竞态**：自检改为给 `ArchiveReader` 传显式的
+  `allow_expensive_kdf=True`，不再临时修改进程级全局变量。
+- **加密归档索引下界**：`index_offset` 现在至少是 `data_offset`（加密归档
+  256），不允许与 Crypto Header 重叠。
+- **跨 mode 引用的语义校验**：minor 足够时仍要求“RGB 父 -> 常数 alpha 的
+  RGBA 子”，否则加载阶段直接拒绝，不必等到解码。
+
+测试：285 条。
 
 ## 1.5.0
 

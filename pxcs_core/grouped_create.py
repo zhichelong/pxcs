@@ -1058,18 +1058,13 @@ def _self_check_archive(
     情况下当场报错，而不是等下次 verify 才发现。
     """
     try:
-        # 自己刚写的归档：允许用创建时指定的高开销 KDF 参数自检，
-        # 否则"用自定义参数创建成功、自检却打不开"会互相矛盾。
-        from .crypto import allow_expensive_kdf, set_allow_expensive_kdf
-
-        previous = allow_expensive_kdf()
-        set_allow_expensive_kdf(True)
-        try:
-            with ArchiveReader(path, password=password) as reader:
-                found = len(reader.entries)
-                index_length = int(reader.header.index_length)
-        finally:
-            set_allow_expensive_kdf(previous)
+        # 自己刚写的归档：允许用创建时指定的高开销 KDF 参数自检。
+        # 通过显式参数放行，不修改进程级全局状态，避免多线程库调用时竞态。
+        with ArchiveReader(
+            path, password=password, allow_expensive_kdf=True
+        ) as reader:
+            found = len(reader.entries)
+            index_length = int(reader.header.index_length)
     except Exception as exc:  # 任何异常都说明产物不可信
         raise PxcsSelfCheckError(
             t("create.self_check_failed", reason=f"{type(exc).__name__}: {exc}")
@@ -1254,7 +1249,14 @@ def create_grouped_archive(
     file_groups = [
         g for g in groups if g and g[0].probe is None
     ]
-    total_source = sum(s.path.stat().st_size for s in sources)
+    total_source = 0
+    for _source in sources:
+        try:
+            total_source += _source.path.stat().st_size
+        except OSError:
+            # 扫描后被删/不可访问的文件不应该让整次创建直接崩掉；
+            # 真正读取失败时会在 worker 里记为 skipped。
+            continue
     stats = CreateStats(
         files_total=len(sources),
         groups=len(image_groups),
@@ -1539,6 +1541,7 @@ def create_grouped_archive(
             ref=cross_parent["id"] if cross_parent is not None and cross_depth else None,
             depth=cross_depth,
             reason=result.reason or "key",
+            meta=result.meta,
         )
         entries.append(entry)
         if result.source_sha:
