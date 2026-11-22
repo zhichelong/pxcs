@@ -482,6 +482,7 @@ def _make_entry(
     centered: bool = False,
     lossy: bool = False,
     reason: str = "",
+    meta: Optional[dict] = None,
 ) -> ArchiveEntry:
     if payload_info:
         offset, length, plain_length, data_crc, data_sha = payload_info
@@ -516,6 +517,7 @@ def _make_entry(
         data_sha256=data_sha,
         mtime_ns=mtime_ns,
         reason=reason,
+        meta=meta,
     )
 
 

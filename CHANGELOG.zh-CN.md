@@ -27,6 +27,32 @@ RGB/RGBA 孪生图的 RGB 内容仍有差异，差分并不是 0。
 **配置**：`config/config.json` 的 `create` 段新增 `key_ref_scope`、
 `key_ref_distance`、`key_ref_min_saving` 三项。
 
+
+**复审修复（1.6.0 增补）**
+
+- **实际参考图与最终 ref 不一致**：父节点编码/写入失败后，子节点可能仍然
+  按父节点的重建图计算 payload，却把 ref 指向父节点的 raw 条目。现在记录每个
+  成员编码时实际使用的参考（`state.ref_member`），必要时把整棵子树退回
+  raw/jpegxl；有损组里父节点回退 raw 也会触发同样的保护。
+- **跨组 key 与组内树深度**：组内局部深度现在受 `255 - key_depth` 限制，
+  写条目时再做一次 `depth + 1 <= 255` 的最终检查。
+- **PXC tile 有界解压**：`pxc_core` 也使用 `decompress_bounded()`，按声明的
+  `raw_len` 限制输出；未知 tile flags 位直接拒绝。
+- **key worker 异常漏记账**：worker 在尝试候选前抛异常时，整组成员都会被
+  记录为 skipped，不再只记录第 1 个和第 8 个之后的成员。
+- **zlib 残差元数据**：ICC/EXIF/XMP/DPI/gamma/comment 现在写进索引
+  `entry.meta`，解码时还原；出现 meta 的归档写 minor 6。此前 zlib 残差会
+  静默丢这些元数据。
+- **minor 与特性一致性**：读取端拒绝 minor < 4 的 jpegxl、minor < 5 的跨
+  mode ref、minor < 6 的 entry meta，避免旧 minor 伪装新语义。
+- **跨组 key 源文件变化**：引用前校验父 key 的像素哈希，并校验目标源哈希，
+  源文件在创建过程中被改动时放弃跨组引用。
+- `pxc_core/codec.py` 的 palette 采样说明修正：采样颜色数 ≤256 不能推出
+  完整 tile ≤256，但完整 tile ≤256 时采样一定 ≤256，所以采样不会漏掉
+  可用的 palette（文档不再暗示它会）。
+
+测试：283 条。
+
 ## 1.5.0
 
 这一版没有改归档格式（minor 仍为 4），重点是把"读取不可信归档"的边界补上，

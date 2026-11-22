@@ -2,10 +2,11 @@
 
 本文记录 PXCS 的二进制布局、版本历史和兼容规则。所有整数均为小端序。
 
-- 当前实现：1.6（最高支持 minor=5）
+- 当前实现：1.6（最高支持 minor=6）
 - 未加密归档写出 minor=2（与 1.2 完全一致）
 - 含 jpegxl 条目的归档写出 minor=4（旧程序会报未知 codec）
 - 含跨 mode 参考（RGB key -> 常数 alpha 的 RGBA 差分）的归档写出 minor=5（1.5 及更旧程序会拒绝）
+- zlib 残差条目在索引 entry.meta 里保存 ICC/EXIF/XMP 等元数据；出现它时写出 minor=6（旧读者会丢元数据，故明确拒绝）。
 - 加密归档写出 minor=3
 
 ## 1. 整体布局
@@ -54,7 +55,7 @@ Index 在加密且文件名加密时是 `nonce(12) || AES-256-GCM(zlib(JSON))`�
 |---|---|---|---|
 | 0 | 4 | magic | `PXCS` |
 | 4 | 2 | version_major | 必须为 1 |
-| 6 | 2 | version_minor | 0..5，当前写出 2 / 3 / 4 / 5 |
+| 6 | 2 | version_minor | 0..6，当前写出 2 / 3 / 4 / 5 / 6 |
 | 8 | 4 | flags | 见下 |
 | 12 | 2 | header_size | 固定 128 |
 | 14 | 4 | entry_count | 条目数 |
@@ -218,7 +219,7 @@ nonce 每条消息独立随机；条目数上限 1,000,000，远低于 96-bit �
 解析规则：
 
 1. `magic` 必须是 `PXCS`，`version_major` 必须是 1；
-2. `version_minor` 不在 `(0,1,2,3,4,5)` 内 → `PxcVersionError`；
+2. `version_minor` 不在 `(0,1,2,3,4,5,6)` 内 → `PxcVersionError`；
 3. `flags & ENCRYPTED`：
    - 只有 `minor >= 3` 才允许；
    - `data_offset` 必须等于 256，且存在加密头；

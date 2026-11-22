@@ -277,7 +277,8 @@
     "entry_depth_link": "Entry {id} depth does not match its parent: expected {expected}, got {actual}",
     "stream_encrypted": "Streaming payloads are not supported for encrypted archives",
     "stream_short": "File shrank while being written: {path}",
-    "stream_changed": "File changed after it was scanned: {path}"
+    "stream_changed": "File changed after it was scanned: {path}",
+    "minor_feature": "Archive minor {minor} does not support {feature} (requires minor {required})"
   },
   "crypto": {
     "missing_library": "Missing the cryptography dependency, cannot handle encrypted archives (pip install cryptography)",

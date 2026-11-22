@@ -78,6 +78,7 @@ from .format import (
     VERSION_MINOR,
     WRITE_MINOR_CRYPTO,
     WRITE_MINOR_JPEGXL,
+    WRITE_MINOR_META,
     WRITE_MINOR_MODEREF,
     WRITE_MINOR_PLAIN,
 )
@@ -153,6 +154,8 @@ class ArchiveEntry:
     mtime_ns: int = 0
     flags: int = 0
     reason: str = ""
+    # zlib 残差没有自己的元数据容器，ICC/EXIF/XMP 等放在这里（JSON）。
+    meta: Optional[dict] = None
 
     @property
     def stored_length(self) -> int:
@@ -188,6 +191,8 @@ class ArchiveEntry:
             "flags": self.flags,
             "reason": self.reason,
         }
+        if self.meta:
+            data["meta"] = self.meta
         if self.plain_length is not None:
             # 仅加密归档需要；未加密时不写，保持与 1.2 索引完全一致。
             data["plain_length"] = self.plain_length
@@ -232,6 +237,11 @@ class ArchiveEntry:
                 mtime_ns=int(obj.get("mtime_ns", 0)),
                 flags=int(obj.get("flags", 0)),
                 reason=str(obj.get("reason", "")),
+                meta=(
+                    None
+                    if not isinstance(obj.get("meta"), dict)
+                    else dict(obj["meta"])
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise PxcsFormatError(t("container.entry_field", reason=exc)) from exc
@@ -461,6 +471,8 @@ class ArchiveWriter:
                 # 残差参考了不同 mode 的 key：旧读者会在 reconstruct 时失败，
                 # 用更高的 minor 让它在加载阶段就明确拒绝。
                 minor = max(minor, WRITE_MINOR_MODEREF)
+            if any(e.meta for e in entries):
+                minor = max(minor, WRITE_MINOR_META)
             if self.crypto is not None:
                 flags = flags | FLAG_ENCRYPTED
             header_zero = HEADER_STRUCT.pack(
@@ -841,6 +853,39 @@ class ArchiveReader:
                     )
                 )
             chain_depths.append(real_depth)
+
+        # 特性与 minor 的一致性：新语义不允许伪装成旧 minor。
+        if minor < WRITE_MINOR_JPEGXL and any(
+            e.codec == CODEC_JPEGXL for e in entries
+        ):
+            raise PxcsFormatError(
+                t(
+                    "container.minor_feature",
+                    minor=minor,
+                    feature="jpegxl",
+                    required=WRITE_MINOR_JPEGXL,
+                )
+            )
+        if minor < WRITE_MINOR_META and any(e.meta for e in entries):
+            raise PxcsFormatError(
+                t(
+                    "container.minor_feature",
+                    minor=minor,
+                    feature="entry metadata",
+                    required=WRITE_MINOR_META,
+                )
+            )
+        if minor < WRITE_MINOR_MODEREF and any(
+            e.ref is not None and entries[e.ref].mode != e.mode for e in entries
+        ):
+            raise PxcsFormatError(
+                t(
+                    "container.minor_feature",
+                    minor=minor,
+                    feature="cross-mode ref",
+                    required=WRITE_MINOR_MODEREF,
+                )
+            )
 
         self.header = ArchiveHeader(
             version_major=major,

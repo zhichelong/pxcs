@@ -46,6 +46,7 @@ from .archive import (
     summary_text,
     _expand_ref_to_mode,
 )
+from .meta import encode_image_meta
 from .codec import (
     encode_keyframe,
     encode_residual_with_preview,
@@ -234,6 +235,7 @@ class _Result:
     mode: str = ""
     image: Optional[ImageData] = None
     error: str = ""
+    meta: Optional[dict] = None
     # 有损量化后与原始像素的偏差（只在选中候选上算一次）。
     max_error: int = 0
     psnr: float = 0.0
@@ -266,6 +268,10 @@ class _GroupState:
     layer_pos: int = 0
     # 成员下标 -> 解码时会得到的像素（有损差分下不等于原始像素）。
     approx: dict[int, ImageData] = field(default_factory=dict)
+    # 成员下标 -> 编码时**实际**用作参考的成员下标（可能是 key）。
+    # 写条目时必须按这个来，不能重新从规划树推导：父节点失败/回退后
+    # 规划树上的 parent 可能与编码时用的参考图不是同一张。
+    ref_member: dict[int, int] = field(default_factory=dict)
 
 
 def _split_groups(items: list[WorkItem]) -> list[list[WorkItem]]:
@@ -640,6 +646,14 @@ def _looks_compressible(path: Path, size: int) -> bool:
     return comp_total < raw_total * 0.9
 
 
+def _local_plan_depth(plan_depth: int, key_depth: int) -> int:
+    """组内参考树还能用几层；给跨组 key 已占用的深度留余量。"""
+    remaining = MAX_DEPTH - max(0, int(key_depth))
+    if remaining <= 0:
+        return 0
+    return max(1, min(int(plan_depth), remaining))
+
+
 def _cross_ref_modes_ok(
     parent_mode: str,
     parent_alpha: Optional[int],
@@ -907,6 +921,11 @@ def _encode_delta_body(
         image=best_approx if keep_image else None,
         max_error=max_error,
         psnr=psnr,
+        meta=(
+            encode_image_meta(image)
+            if best_codec == CODEC_ZLIB_RESIDUAL
+            else None
+        ),
     )
 
 
@@ -1022,6 +1041,7 @@ def _write_result(
         centered=result.centered,
         lossy=result.lossy,
         reason=result.reason or result.codec,
+        meta=result.meta,
     )
     entries.append(entry)
     if source_sha:
@@ -1430,12 +1450,21 @@ def create_grouped_archive(
     ) -> bool:
         """把已经编码好的 key 落成条目，返回是否成功（只在主线程调用）。"""
         nonlocal done_entries, processed_bytes, tasks_done, tasks_bytes
+        if packed[0] < 0:
+            # worker 可能在尝试完候选之前就抛异常，此时 failures 只包含
+            # 第一个成员。必须把**整组**没被记录的成员都记下来，不能
+            # 让第 2..7 个成员静默消失。
+            recorded = {candidate.source.path for candidate, _ in packed[3]}
+            for candidate, message in packed[3]:
+                record_skipped(candidate, message)
+            for candidate in state.members:
+                if candidate.source.path not in recorded:
+                    record_skipped(candidate, "group_key_unavailable")
+            return False
+
+        # key 成功，但前面尝试失败的候选取仍然要记进 skipped。
         for candidate, message in packed[3]:
             record_skipped(candidate, message)
-        if packed[0] < 0:
-            for candidate in state.members[MAX_KEY_CANDIDATES:]:
-                record_skipped(candidate, "group_key_unavailable")
-            return False
 
         offset, key_item, result = packed[0], packed[1], packed[2]
         state.key_index = offset
@@ -1460,6 +1489,10 @@ def create_grouped_archive(
                     compute_file_hash=False,
                     compute_source_pixel_hash=False,
                 )
+                expected_parent = entries[cross_parent["id"]].pixel_sha256
+                if expected_parent and parent_image.pixel_hash.hex() != expected_parent:
+                    # 源文件在 key 写入后被改过：归档里的父图已经不是它了。
+                    raise PxcError("cross_key_parent_changed")
                 parent_image = _expand_ref_to_mode(
                     parent_image, result.mode, result.constant_alpha
                 )
@@ -1471,6 +1504,7 @@ def create_grouped_archive(
             if (
                 not delta.error
                 and delta.codec in RESIDUAL_CODECS
+                and delta.source_sha == result.source_sha
                 and len(delta.payload) < len(result.payload) * float(opts.key_ref_min_saving)
             ):
                 delta.reason = "cross_key"
@@ -1588,7 +1622,15 @@ def create_grouped_archive(
             del state.approx[key]
         for index in state.layers[state.layer_pos]:
             parent = state.parents[index]
-            ref_image = state.approx.get(parent) or state.key_image
+            if parent in state.approx:
+                ref_image = state.approx[parent]
+                ref_member = parent
+            else:
+                # 父节点的重建图不可用（失败/被跳过）：退回 key。
+                # 必须记住这个事实，否则写条目时会错误地指向 parent。
+                ref_image = state.key_image
+                ref_member = state.key_index
+            state.ref_member[index] = ref_member
             fut = executor.submit(
                 _encode_delta,
                 _DeltaRef(image=ref_image),
@@ -1602,6 +1644,10 @@ def create_grouped_archive(
 
     def finish_state(state: _GroupState) -> None:
         nonlocal done_entries, processed_bytes
+        # 父节点最终没能写成残差（或根本没写出来）时，子节点的 payload
+        # 可能是按父节点的“重建图”算的；此时不能把 ref 换成 raw 条目。
+        # 这些后代必须一起退回 raw，否则会写出结构合法但像素错误的归档。
+        forced_raw: set[int] = set()
         # key 已写入；按组内自然序写剩余条目。
         for index, item in enumerate(state.members[1:], 1):
             if index <= state.key_index:
@@ -1619,21 +1665,42 @@ def create_grouped_archive(
             before = len(entries)
             ref_id_for_entry = None
             ref_depth_for_entry = 0
+            force_raw = False
             if result.codec in RESIDUAL_CODECS:
-                parent = state.parents[index] if index < len(state.parents) else -1
-                if parent >= 0 and parent in state.entry_of_member:
-                    ref_id_for_entry = state.entry_of_member[parent]
-                else:
-                    # 规划失败/父条目被跳过：退回星形，保证 ref 始终有效。
+                ref_member = state.ref_member.get(index, state.key_index)
+                if ref_member in forced_raw:
+                    force_raw = True
+                elif ref_member == state.key_index:
                     ref_id_for_entry = state.key_id
-                # depth 一律按**实际** ref 条目算，不能沿用规划时的层深：
-                # 父条目被跳过时 ref 会退到 key，沿用的 depth 就比真实链深大，
-                # 加载端的链深校验会拒绝这个归档。
-                ref_depth_for_entry = (
-                    entries[ref_id_for_entry].depth
-                    if ref_id_for_entry is not None and ref_id_for_entry < len(entries)
-                    else 0
-                )
+                else:
+                    ref_id_for_entry = state.entry_of_member.get(ref_member)
+                    if ref_id_for_entry is None:
+                        # 父节点没写成任何条目，但子节点是按它的像素算的。
+                        force_raw = True
+                    elif (
+                        _group_is_lossy(state.members)
+                        and entries[ref_id_for_entry].codec not in RESIDUAL_CODECS
+                    ):
+                        # 有损组里父节点回退成 raw：它的像素和子节点编码时
+                        # 用的重建图不同，不能继续引用。
+                        force_raw = True
+                if not force_raw:
+                    ref_depth_for_entry = (
+                        entries[ref_id_for_entry].depth
+                        if ref_id_for_entry is not None and ref_id_for_entry < len(entries)
+                        else 0
+                    )
+                    if ref_depth_for_entry + 1 > MAX_DEPTH:
+                        force_raw = True
+            if force_raw:
+                fallback = _read_raw_result(item, reason="ref_mismatch")
+                if fallback.error:
+                    record_skipped(item, fallback.error)
+                    continue
+                result = fallback
+                forced_raw.add(index)
+                ref_id_for_entry = None
+                ref_depth_for_entry = 0
             try:
                 written, is_dup = _write_result(
                     writer,
@@ -1658,6 +1725,10 @@ def create_grouped_archive(
                     record_skipped(item, str(exc2))
                     continue
             entry = entries[-1]
+            if _group_is_lossy(state.members) and entry.codec not in RESIDUAL_CODECS:
+                # 有损组里父节点最终不是残差（raw/jpegxl/dup）：它的像素
+                # 不等于子节点编码时使用的重建图，后代必须一起回退。
+                forced_raw.add(index)
             state.entry_of_member[index] = entry.id
             processed_bytes += entry.size
             done_entries += 1
@@ -1848,6 +1919,9 @@ def create_grouped_archive(
                         if _group_is_lossy(state.members)
                         else TREE_MAX_DEPTH_LOSSLESS
                     )
+                # 跨组引用的 key 可能已经很深；组内局部深度必须留出
+                # 255 - key_depth 的余量，否则最终条目 depth 会越界。
+                plan_depth = _local_plan_depth(plan_depth, state.key_depth)
                 state.parents = _plan_reference_tree(
                     state.thumbs, state.key_index, plan_depth
                 )

@@ -161,9 +161,10 @@ Chinese versions of the specifications: [FORMAT.zh-CN.md](docs/FORMAT.zh-CN.md),
 for the raw `.pxc` codec stream (superseded by `.pxcs`); it stays in the tree so old files
 remain readable.
 
-Format versions: a reader accepts minors 0–5. Writes are `1.2` by default (`1.3` with
-encryption, `1.4` when `jpegxl` entries are present), so an older reader can still open
-plain archives produced today.
+Format versions: a reader accepts minors 0–6. Writes are `1.2` by default (`1.3` with
+encryption, `1.4` when `jpegxl` entries are present; `1.5` for cross-mode residual
+references and `1.6` when a zlib residual carries `entry.meta`), so an older reader can
+still open plain archives produced today.
 
 ## Correctness guarantees
 

@@ -61,6 +61,7 @@ from .config import (
     ZLIB_LEVEL,
 )
 from .filters import FILTER_TYPES, choose_row_filters, unfilter_rows
+from .zlibsafe import decompress_bounded
 from .errors import (
     PxcCorruptionError,
     PxcDecodeError,
@@ -416,11 +417,14 @@ def decode_tiles(
         offset += comp_len
         if crc32(stored) != payload_crc:
             raise PxcCorruptionError("tile payload CRC 校验失败")
+        if flags & ~FLAG_PAYLOAD_ZLIB:
+            raise PxcCorruptionError(f"tile flags 含未知位: {flags}")
         if flags & FLAG_PAYLOAD_ZLIB:
-            try:
-                raw = zlib.decompress(stored)
-            except zlib.error as exc:
-                raise PxcCorruptionError(f"tile zlib 解压失败: {exc}") from exc
+            # 必须按声明的 raw_len 有界解压：只检查 raw_len 不够，
+            # 恶意 payload 可以在解压后才被长度校验拒绝，那时内存已经炸了。
+            raw = decompress_bounded(
+                stored, limit=raw_len, expected=raw_len, label="tile"
+            )
         else:
             raw = stored
         if len(raw) != raw_len:

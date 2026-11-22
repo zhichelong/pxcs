@@ -30,6 +30,7 @@ from pxc_core.image_io import (
 )
 
 from .container import ArchiveEntry
+from .meta import decode_image_meta
 from .zlibsafe import decompress_bounded
 
 
@@ -370,6 +371,7 @@ def decode_zlib_residual(
         width=entry.width,
         height=entry.height,
         data=data,
+        **decode_image_meta(entry.meta),
     )
     return reconstruct_image(ref, residual, entry)
 

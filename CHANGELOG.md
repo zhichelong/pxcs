@@ -31,6 +31,36 @@ and remain readable by older versions.
 **Config**: `config/config.json` gains `key_ref_scope`, `key_ref_distance` and
 `key_ref_min_saving` under `create`.
 
+
+**Review fixes (1.6.0 addendum)**
+
+- **Encoded reference vs final ref**: after a parent failed to encode or write,
+  children could still carry a payload computed against the parent's reconstructed
+  image while their `ref` pointed at the parent's raw entry. Each member now records
+  the reference actually used (`state.ref_member`) and the whole subtree falls back
+  to raw/jpegxl when needed; a lossy parent that fell back to raw triggers the same
+  guard.
+- **Cross-group key vs tree depth**: local tree depth is now capped by
+  `255 - key_depth`, and entry writing performs a final `depth + 1 <= 255` check.
+- **Bounded PXC tile decompression**: `pxc_core` now uses `decompress_bounded()` with
+  the declared `raw_len`; unknown tile flag bits are rejected.
+- **Key-worker exceptions**: if a worker raises before trying candidates, every member
+  of the group is recorded as skipped, not just the first and the ones after the
+  candidate window.
+- **zlib residual metadata**: ICC/EXIF/XMP/DPI/gamma/comment are stored in the index
+  `entry.meta` and restored on decode; archives using it are written with minor 6.
+  Previously the zlib residual path silently dropped this metadata.
+- **Minor/feature consistency**: readers reject jpegxl below minor 4, cross-mode refs
+  below minor 5 and entry meta below minor 6.
+- **Cross-group key source changes**: the parent key's pixel hash and the target's
+  source hash are checked, and the cross reference is abandoned if a source changed
+  during creation.
+- The palette sampling note in `pxc_core/codec.py` was corrected: sample <=256 does
+  not imply full tile <=256, but a full tile <=256 always samples <=256, so sampling
+  never misses a usable palette.
+
+Tests: 283.
+
 ## 1.5.0
 
 No archive-format change (minor is still 4). This release is about the boundary when
